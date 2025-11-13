@@ -81,3 +81,6 @@ temp/
 tmp/
 cache/
 .cache/
+
+# Claude Code
+.claude/
