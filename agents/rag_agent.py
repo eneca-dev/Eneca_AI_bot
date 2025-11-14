@@ -57,10 +57,10 @@ class RAGAgent(BaseAgent):
 
         try:
             # Search with relevance scores
+            # Using default threshold (0.01) from vector_store_manager
             documents = self.vector_store.search_with_score(
                 query=query,
-                k=k,
-                score_threshold=0.7
+                k=k
             )
 
             if not documents:

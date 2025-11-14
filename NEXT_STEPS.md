@@ -46,7 +46,7 @@ create table documents (
   id bigserial primary key,
   content text not null,
   metadata jsonb,
-  embedding vector(1536)  -- Размерность для OpenAI embeddings
+  embedding vector(1536)  -- Размерность для OpenAI text-embedding-3-small
 );
 
 -- Создать функцию для поиска похожих документов

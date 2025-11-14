@@ -20,11 +20,13 @@ class VectorStoreManager:
     def _initialize(self):
         """Initialize Supabase client and embeddings"""
         try:
-            # Initialize OpenAI embeddings
+            # Initialize OpenAI embeddings with text-embedding-3-small
+            # This matches the model used for embedding documents in Supabase
             self.embeddings = OpenAIEmbeddings(
+                model="text-embedding-3-small",
                 openai_api_key=settings.openai_api_key
             )
-            logger.info("OpenAI embeddings initialized")
+            logger.info("OpenAI embeddings initialized (text-embedding-3-small)")
 
             # Initialize Supabase client if credentials are available and valid
             if (settings.supabase_url and
@@ -91,7 +93,7 @@ class VectorStoreManager:
             logger.error(f"Error searching vector store: {e}")
             return []
 
-    def search_with_score(self, query: str, k: int = 5, score_threshold: float = 0.7) -> List[dict]:
+    def search_with_score(self, query: str, k: int = 5, score_threshold: float = 0.35) -> List[dict]:
         """
         Search for similar documents with relevance scores
 
@@ -115,7 +117,7 @@ class VectorStoreManager:
 
             documents = []
             for doc, score in results:
-                relevance = "high" if score >= 0.9 else "medium" if score >= 0.7 else "low"
+                relevance = "high" if score >= 0.6 else "medium" if score >= 0.4 else "low"
                 documents.append({
                     "content": doc.page_content,
                     "metadata": doc.metadata,
