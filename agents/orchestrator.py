@@ -1,31 +1,43 @@
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Dict, Any
 from agents.base import BaseAgent
-from agents.rag_agent import RAGAgent
-from langchain.agents import AgentExecutor, create_openai_functions_agent
-from langchain.tools import Tool
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import SystemMessage
+from langgraph.prebuilt import create_react_agent
+from langchain_core.tools import tool
+from core.config import settings
+from core.memory import memory_manager
+from core.agent_registry import agent_registry
 from loguru import logger
 
 
 class OrchestratorAgent(BaseAgent):
     """Main orchestrator agent that handles user queries with routing to specialized agents"""
 
-    def __init__(self, model: str = "gpt-5-mini", temperature: float = 0.7):
-        """Initialize orchestrator agent"""
+    def __init__(self, model: str = None, temperature: float = None):
+        """Initialize orchestrator agent
+
+        Args:
+            model: OpenAI model name (defaults to config value)
+            temperature: Response temperature (defaults to config value)
+        """
+        # Use config defaults if not specified
+        model = model or settings.orchestrator_model
+        temperature = temperature if temperature is not None else settings.orchestrator_temperature
+
         super().__init__(model=model, temperature=temperature)
 
-        # Initialize RAG agent
-        self.rag_agent = RAGAgent()
+        # Load agents from YAML configuration
+        agent_registry.load_from_yaml()
 
-        # Setup tools
+        # Setup tools from registered agents
         self.tools = self._setup_tools()
 
-        # Setup agent executor
-        self.agent_executor = self._setup_agent_executor()
+        # Setup agent with LangGraph create_react_agent
+        self.agent = self._setup_agent()
 
-        logger.info("OrchestratorAgent initialized with RAG tool")
+        # Get checkpointer from memory manager
+        self.checkpointer = memory_manager.get_checkpointer()
+
+        logger.info(f"OrchestratorAgent initialized with RAG tool and memory={'enabled' if self.checkpointer else 'disabled'}")
 
     def _get_default_prompt(self) -> str:
         """Load system prompt from prompts/orchestrator.md"""
@@ -40,81 +52,76 @@ class OrchestratorAgent(BaseAgent):
             logger.warning(f"Prompt file not found at {prompt_path}, using default")
             return "You are a helpful AI assistant that routes queries to appropriate tools."
 
-    def _setup_tools(self) -> List[Tool]:
-        """Setup tools for the orchestrator"""
-        tools = [
-            Tool(
-                name="knowledge_search",
-                description=(
-                    "Используй этот инструмент для поиска информации в базе знаний. "
-                    "Подходит для вопросов о функционале приложения, инструкций, "
-                    "документации и любой специфической информации о системе. "
-                    "Вход: запрос пользователя (строка). "
-                    "Выход: релевантная информация из базы знаний."
-                ),
-                func=self.rag_agent.answer_question,
-            )
-        ]
-
-        logger.info(f"Setup {len(tools)} tools for orchestrator")
+    def _setup_tools(self) -> List:
+        """Setup tools for the orchestrator from registered agents"""
+        # Get tools automatically from all registered agents
+        tools = agent_registry.create_tools_for_agents()
+        logger.info(f"Setup {len(tools)} tools for orchestrator from AgentRegistry")
         return tools
 
-    def _setup_agent_executor(self) -> AgentExecutor:
-        """Setup LangChain agent executor with tools"""
-        # Create prompt template
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            MessagesPlaceholder(variable_name="chat_history", optional=True),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
+    def _setup_agent(self):
+        """Setup LangGraph ReAct agent with checkpointer"""
+        # Get checkpointer from memory manager
+        checkpointer = memory_manager.get_checkpointer()
 
-        # Create agent
-        agent = create_openai_functions_agent(
-            llm=self.llm,
+        # Create ReAct agent with LangGraph
+        agent = create_react_agent(
+            model=self.llm,
             tools=self.tools,
-            prompt=prompt
+            prompt=self.system_prompt,  # System prompt for the agent
+            checkpointer=checkpointer  # Enable conversation memory
         )
 
-        # Create agent executor
-        agent_executor = AgentExecutor(
-            agent=agent,
-            tools=self.tools,
-            verbose=True,
-            max_iterations=5,
-            early_stopping_method="generate",
-            handle_parsing_errors=True,
-        )
+        logger.info(f"ReAct agent created with LangGraph and checkpointer={'enabled' if checkpointer else 'disabled'}")
+        return agent
 
-        logger.info("Agent executor created successfully")
-        return agent_executor
-
-    def process_message(self, user_message: str) -> str:
+    def process_message(self, user_message: str, thread_id: str = "default", config: Optional[Dict[str, Any]] = None) -> str:
         """
         Process user message with routing to appropriate tools
 
         Args:
             user_message: User's input message
+            thread_id: Thread ID for conversation memory (default: "default")
+            config: Optional configuration dict for agent invocation
 
         Returns:
             Agent's response
         """
-        logger.info(f"Processing message: {user_message[:50]}...")
+        logger.info(f"Processing message in thread '{thread_id}': {user_message[:50]}...")
 
         try:
-            # Run agent executor
-            response = self.agent_executor.invoke({
-                "input": user_message,
-            })
+            # Prepare config with thread_id for memory persistence
+            if config is None:
+                config = {}
 
-            # Extract output
-            output = response.get("output", "Не удалось получить ответ.")
+            # Add thread_id to config if memory is enabled
+            if self.checkpointer:
+                config["configurable"] = {"thread_id": thread_id}
 
-            logger.info("Message processed successfully")
+            # Run agent with LangGraph ReAct pattern
+            response = self.agent.invoke(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config=config
+            )
+
+            # Extract output from messages
+            if isinstance(response, dict) and "messages" in response:
+                # Get last message content
+                last_message = response["messages"][-1]
+                if hasattr(last_message, 'content'):
+                    output = last_message.content
+                elif isinstance(last_message, dict):
+                    output = last_message.get("content", "Не удалось получить ответ.")
+                else:
+                    output = str(last_message)
+            else:
+                output = str(response)
+
+            logger.info(f"Message processed successfully in thread '{thread_id}'")
             return output
 
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"Error processing message in thread '{thread_id}': {e}")
             return (
                 "Произошла ошибка при обработке вашего запроса. "
                 "Пожалуйста, попробуйте переформулировать вопрос."

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 from langchain_openai import ChatOpenAI
-from langchain.schema import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from core.config import settings
 from loguru import logger
 

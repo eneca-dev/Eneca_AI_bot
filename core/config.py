@@ -21,6 +21,24 @@ class Settings(BaseSettings):
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     environment: str = Field("development", alias="ENVIRONMENT")
 
+    # Agent Configuration
+    orchestrator_model: str = Field("gpt-5-mini", alias="ORCHESTRATOR_MODEL")
+    orchestrator_temperature: float = Field(0.7, alias="ORCHESTRATOR_TEMPERATURE")
+    rag_agent_model: str = Field("gpt-5-mini", alias="RAG_AGENT_MODEL")
+    rag_agent_temperature: float = Field(0.3, alias="RAG_AGENT_TEMPERATURE")
+    max_agent_iterations: int = Field(5, alias="MAX_AGENT_ITERATIONS")
+
+    # Embedding & Vector Store Configuration
+    embedding_model: str = Field("text-embedding-3-small", alias="EMBEDDING_MODEL")
+    embedding_dimensions: int = Field(1536, alias="EMBEDDING_DIMENSIONS")
+    vector_search_k: int = Field(5, alias="VECTOR_SEARCH_K")
+    similarity_threshold: float = Field(0.35, alias="SIMILARITY_THRESHOLD")
+
+    # Memory Configuration
+    enable_conversation_memory: bool = Field(True, alias="ENABLE_CONVERSATION_MEMORY")
+    memory_type: str = Field("sqlite", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "postgres", "redis"
+    memory_db_path: str = Field("data/checkpoints.db", alias="MEMORY_DB_PATH")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

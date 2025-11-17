@@ -3,23 +3,28 @@ from pathlib import Path
 from typing import List, Dict
 from agents.base import BaseAgent
 from core.vector_store import vector_store_manager
+from core.config import settings
 from loguru import logger
 
 
 class RAGAgent(BaseAgent):
     """RAG Agent that searches knowledge base and provides factual answers"""
 
-    def __init__(self, model: str = "gpt-5-mini", temperature: float = 0.3):
+    def __init__(self, model: str = None, temperature: float = None):
         """
         Initialize RAG agent
 
         Args:
-            model: OpenAI model name
-            temperature: Lower temperature for more factual responses
+            model: OpenAI model name (defaults to config value)
+            temperature: Lower temperature for more factual responses (defaults to config value)
         """
+        # Use config defaults if not specified
+        model = model or settings.rag_agent_model
+        temperature = temperature if temperature is not None else settings.rag_agent_temperature
+
         super().__init__(model=model, temperature=temperature)
         self.vector_store = vector_store_manager
-        logger.info("RAGAgent initialized")
+        logger.info(f"RAGAgent initialized with model {model} and temperature {temperature}")
 
     def _get_default_prompt(self) -> str:
         """Load system prompt from prompts/rag_agent.md"""
@@ -37,13 +42,13 @@ class RAGAgent(BaseAgent):
                 "factual answers based only on the information found in the documents."
             )
 
-    def search_knowledge_base(self, query: str, k: int = 5) -> str:
+    def search_knowledge_base(self, query: str, k: int = None) -> str:
         """
         Search knowledge base and return formatted results
 
         Args:
             query: User's search query
-            k: Number of results to return
+            k: Number of results to return (defaults to config value)
 
         Returns:
             Formatted string with search results
@@ -56,12 +61,8 @@ class RAGAgent(BaseAgent):
             )
 
         try:
-            # Search with relevance scores
-            # Using default threshold (0.01) from vector_store_manager
-            documents = self.vector_store.search_with_score(
-                query=query,
-                k=k
-            )
+            # Search with relevance scores (uses config defaults if k not provided)
+            documents = self.vector_store.search_with_score(query=query, k=k)
 
             if not documents:
                 return "Информация по вашему запросу не найдена в базе знаний."

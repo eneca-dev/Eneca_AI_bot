@@ -81,6 +81,7 @@ temp/
 tmp/
 cache/
 .cache/
+data/  # Conversation memory checkpoints
 
 # Claude Code
 .claude/
