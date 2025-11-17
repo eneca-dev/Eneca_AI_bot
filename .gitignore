@@ -84,3 +84,5 @@ cache/
 
 # Claude Code
 .claude/
+.mcp-servers-info.md
+.mcp.json

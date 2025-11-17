@@ -9,7 +9,7 @@ from loguru import logger
 class RAGAgent(BaseAgent):
     """RAG Agent that searches knowledge base and provides factual answers"""
 
-    def __init__(self, model: str = "gpt-4o-mini", temperature: float = 0.3):
+    def __init__(self, model: str = "gpt-5-mini", temperature: float = 0.3):
         """
         Initialize RAG agent
 

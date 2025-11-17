@@ -12,7 +12,7 @@ from loguru import logger
 class OrchestratorAgent(BaseAgent):
     """Main orchestrator agent that handles user queries with routing to specialized agents"""
 
-    def __init__(self, model: str = "gpt-4o-mini", temperature: float = 0.7):
+    def __init__(self, model: str = "gpt-5-mini", temperature: float = 0.7):
         """Initialize orchestrator agent"""
         super().__init__(model=model, temperature=temperature)
 
