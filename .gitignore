@@ -81,3 +81,9 @@ temp/
 tmp/
 cache/
 .cache/
+data/  # Conversation memory checkpoints
+
+# Claude Code
+.claude/
+.mcp-servers-info.md
+.mcp.json

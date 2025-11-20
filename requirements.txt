@@ -4,8 +4,9 @@ python-telegram-bot==21.0.1
 # LangChain and AI
 langchain==0.3.13
 langchain-openai==0.2.14
-langchain-anthropic==0.3.3
 langchain-community==0.3.13
+langsmith==0.2.4
+langgraph==0.2.59
 
 # Database
 supabase==2.11.0
@@ -16,9 +17,20 @@ python-dotenv==1.0.1
 
 # Utilities
 requests==2.32.3
-httpx==0.28.1
+httpx>=0.27,<0.28
 pydantic==2.10.4
 pydantic-settings==2.7.0
+
+# FastAPI and Web
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Vector Stores
+qdrant-client==1.12.1
+# pinecone-client==5.0.1
+
+# Memory/Cache
+redis==5.2.1
 
 # Logging and Monitoring
 loguru==0.7.3

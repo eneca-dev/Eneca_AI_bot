@@ -1,0 +1,35 @@
+# Eneca AI Bot - Agent Configuration
+# Агенты загружаются динамически из этого файла
+
+agents:
+  # RAG Agent - поиск в базе знаний
+  - name: knowledge_search
+    class_path: agents.rag_agent.RAGAgent
+    enabled: true
+    priority: 10  # Высокий приоритет
+    description: "Агент для поиска информации в базе знаний"
+    tool_description: |
+      Используй этот инструмент для поиска информации в базе знаний.
+      Подходит для вопросов о функционале приложения, инструкций,
+      документации и любой специфической информации о системе.
+      Вход: запрос пользователя (строка).
+      Выход: релевантная информация из базы знаний.
+    config:
+      # Оставляем пустым - используются значения из settings
+      # model: gpt-5-mini
+      # temperature: 0.3
+
+  # Web Search Agent - поиск в интернете (пример)
+  # - name: web_search
+  #   class_path: agents.web_search.WebSearchAgent
+  #   enabled: false
+  #   priority: 3
+  #   description: "Агент для поиска информации в интернете"
+  #   tool_description: |
+  #     Используй этот инструмент для поиска актуальной информации в интернете.
+  #     Подходит для вопросов о текущих событиях, новостях, погоде и т.д.
+  #     Вход: поисковый запрос (строка).
+  #     Выход: результаты поиска из интернета.
+  #   config:
+  #     api_key: ${GOOGLE_SEARCH_API_KEY}
+  #     max_results: 5
