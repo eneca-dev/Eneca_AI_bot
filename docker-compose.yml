@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  ai-agent:
+    build: .
+    container_name: ai_agent_bot
+    restart: always  # <-- Если упадет, сам поднимется. Если сервер перезагрузится, сам запустится.
+    volumes:
+      - .:/app       # (Опционально) Чтобы файлы были связаны
