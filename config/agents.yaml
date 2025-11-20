@@ -16,7 +16,7 @@ agents:
       Выход: релевантная информация из базы знаний.
     config:
       # Оставляем пустым - используются значения из settings
-      # model: gpt-5-mini
+      # model: gpt-4o
       # temperature: 0.3
 
   # Web Search Agent - поиск в интернете (пример)
