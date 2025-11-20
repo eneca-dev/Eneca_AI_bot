@@ -1,15 +1,23 @@
 # Eneca AI Bot - Webhook Integration
 
+> 📚 **Полное руководство по интеграции:** См. [API_INTEGRATION.md](API_INTEGRATION.md)
+>
+> 🚀 **Новые возможности:**
+> - ✅ API Key аутентификация
+> - ✅ Streaming ответы (Server-Sent Events)
+> - ✅ Примеры для React и vanilla JavaScript
+> - ✅ Conversation memory
+
 ## Локальное тестирование с ngrok
 
-### 1. Запуск webhook сервера
+### 1. Запуск API сервера
 
 ```bash
 # Активировать виртуальное окружение
 .venv\Scripts\activate
 
 # Запустить сервер
-python webhook_server.py
+python server.py
 ```
 
 Сервер запустится на `http://localhost:8000`
@@ -41,7 +49,7 @@ https://abc123.ngrok-free.app
 
 В n8n workflow:
 1. Добавить **HTTP Request** node
-2. URL: `https://YOUR-NGROK-URL.ngrok-free.app/webhook`
+2. URL: `https://YOUR-NGROK-URL.ngrok-free.app/api/chat`
 3. Method: `POST`
 4. Body (JSON):
 ```json
@@ -61,21 +69,21 @@ python test_webhook.py
 
 **Через curl:**
 ```bash
-curl -X POST http://localhost:8000/webhook \
+curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"Привет!\"}"
 ```
 
 **Через ngrok URL:**
 ```bash
-curl -X POST https://YOUR-NGROK-URL.ngrok-free.app/webhook \
+curl -X POST https://YOUR-NGROK-URL.ngrok-free.app/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"Привет!\"}"
 ```
 
 ## API Endpoints
 
-### POST /webhook
+### POST /api/chat
 Основной endpoint для обработки сообщений
 
 **Request:**
@@ -100,7 +108,10 @@ curl -X POST https://YOUR-NGROK-URL.ngrok-free.app/webhook \
 }
 ```
 
-### POST /webhook/raw
+### POST /api/chat/stream
+Streaming endpoint с Server-Sent Events (SSE)
+
+### POST /api/debug
 Отладочный endpoint - принимает любой JSON
 
 ### GET /health
@@ -135,7 +146,7 @@ pip install -r requirements.txt
 
 3. **Запустить с systemd или supervisor:**
 ```bash
-uvicorn webhook_server:app --host 0.0.0.0 --port 8000
+uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
 4. **Nginx reverse proxy:**

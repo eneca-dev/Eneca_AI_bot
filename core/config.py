@@ -16,15 +16,19 @@ class Settings(BaseSettings):
     # Bot Configuration
     bot_token: Optional[str] = Field(None, alias="BOT_TOKEN")
 
+    # API Security
+    api_key: Optional[str] = Field(None, alias="API_KEY")
+    api_key_header: str = Field("X-API-Key", alias="API_KEY_HEADER")
+
     # Application Settings
     debug: bool = Field(True, alias="DEBUG")
-    log_level: str = Field("INFO", alias="LOG_LEVEL")
+    log_level: str = Field("DEBUG", alias="LOG_LEVEL")
     environment: str = Field("development", alias="ENVIRONMENT")
 
     # Agent Configuration
-    orchestrator_model: str = Field("gpt-5-mini", alias="ORCHESTRATOR_MODEL")
+    orchestrator_model: str = Field("gpt-4o", alias="ORCHESTRATOR_MODEL")
     orchestrator_temperature: float = Field(0.7, alias="ORCHESTRATOR_TEMPERATURE")
-    rag_agent_model: str = Field("gpt-5-mini", alias="RAG_AGENT_MODEL")
+    rag_agent_model: str = Field("gpt-4o", alias="RAG_AGENT_MODEL")
     rag_agent_temperature: float = Field(0.3, alias="RAG_AGENT_TEMPERATURE")
     max_agent_iterations: int = Field(5, alias="MAX_AGENT_ITERATIONS")
 
@@ -36,7 +40,7 @@ class Settings(BaseSettings):
 
     # Memory Configuration
     enable_conversation_memory: bool = Field(True, alias="ENABLE_CONVERSATION_MEMORY")
-    memory_type: str = Field("sqlite", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "postgres", "redis"
+    memory_type: str = Field("memory", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "postgres", "redis"
     memory_db_path: str = Field("data/checkpoints.db", alias="MEMORY_DB_PATH")
 
     class Config:

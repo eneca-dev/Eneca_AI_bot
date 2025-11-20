@@ -1,8 +1,9 @@
 # Быстрый старт Webhook
 
-## ✅ Webhook сервер УЖЕ ЗАПУЩЕН!
+## ✅ API сервер готов к запуску!
 
-Сервер работает на: `http://localhost:8000`
+Для запуска: `python server.py`
+Сервер будет работать на: `http://localhost:8000`
 
 ## Тест локально
 
@@ -34,7 +35,7 @@ ngrok http 8000
 2. Найди **HTTP Request** node или создай новый
 3. Настрой:
    - **Method:** POST
-   - **URL:** `https://YOUR-NGROK-URL.ngrok-free.app/webhook`
+   - **URL:** `https://YOUR-NGROK-URL.ngrok-free.app/api/chat`
    - **Body → JSON:**
    ```json
    {
@@ -55,9 +56,9 @@ ngrok http 8000
 
 ## Тест через n8n webhook
 
-**Отправь POST на твой n8n webhook:**
+**Локальный тест:**
 ```bash
-curl -X POST https://eneca.app.n8n.cloud/webhook-test/0378ba55-d98b-4983-b0ef-83a0ac4ee28c \
+curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Привет! Тестирую AI бота"}'
 ```
@@ -76,8 +77,9 @@ curl http://localhost:8000/health
 
 ## Остановка
 
-**Остановить webhook сервер:**
-- Найти процесс: `tasklist | findstr python`
+**Остановить API сервер:**
+- В окне терминала нажать `Ctrl+C`
+- Или найти процесс: `tasklist | findstr python`
 - Убить: `taskkill /F /PID <process_id>`
 
 **Остановить ngrok:**
@@ -85,8 +87,8 @@ curl http://localhost:8000/health
 
 ## Логи
 
-**Логи webhook сервера:**
-- В реальном времени видны в окне где запущен `webhook_server.py`
+**Логи API сервера:**
+- В реальном времени видны в окне где запущен `server.py`
 - Файл: `logs/app.log`
 
 **Логи ngrok:**
