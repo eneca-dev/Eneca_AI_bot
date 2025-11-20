@@ -143,9 +143,9 @@ Add to your `.env` file:
 
 ```bash
 # Agent Configuration (optional - has defaults)
-ORCHESTRATOR_MODEL=gpt-5-mini
+ORCHESTRATOR_MODEL=gpt-4o
 ORCHESTRATOR_TEMPERATURE=0.7
-RAG_AGENT_MODEL=gpt-5-mini
+RAG_AGENT_MODEL=gpt-4o
 RAG_AGENT_TEMPERATURE=0.3
 
 # Vector Store Configuration (optional)
@@ -336,7 +336,7 @@ from agents.base import BaseAgent
 
 class MyAgent(BaseAgent):
     def __init__(self, **config):
-        super().__init__(model=config.get('model', 'gpt-5-mini'))
+        super().__init__(model=config.get('model', 'gpt-4o'))
 
     def process_message(self, user_message: str) -> str:
         # Your agent logic here

@@ -11,7 +11,7 @@ class BaseAgent(ABC):
 
     def __init__(
         self,
-        model: str = "gpt-5-mini",
+        model: str = "gpt-4o",
         temperature: float = 0.7,
         system_prompt: Optional[str] = None
     ):

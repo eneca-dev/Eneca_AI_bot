@@ -5,5 +5,6 @@ services:
     build: .
     container_name: ai_agent_bot
     restart: always  # <-- Если упадет, сам поднимется. Если сервер перезагрузится, сам запустится.
+    env_file: ".env"  # <--- ДОБАВЬ ВОТ ЭТУ СТРОКУ
     volumes:
       - .:/app       # (Опционально) Чтобы файлы были связаны
