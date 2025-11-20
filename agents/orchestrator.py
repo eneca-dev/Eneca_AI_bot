@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any
 from agents.base import BaseAgent
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
 from core.config import settings
 from core.memory import memory_manager
 from core.agent_registry import agent_registry
@@ -68,7 +69,7 @@ class OrchestratorAgent(BaseAgent):
         agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
-            prompt=self.system_prompt,  # System prompt for the agent
+            state_modifier=self.system_prompt,  # System prompt for the agent (updated for LangGraph 0.2.x)
             checkpointer=checkpointer  # Enable conversation memory
         )
 
@@ -99,25 +100,47 @@ class OrchestratorAgent(BaseAgent):
                 config["configurable"] = {"thread_id": thread_id}
 
             # Run agent with LangGraph ReAct pattern
+            # Use HumanMessage for proper serialization
             response = self.agent.invoke(
-                {"messages": [{"role": "user", "content": user_message}]},
+                {"messages": [HumanMessage(content=user_message)]},
                 config=config
             )
+
+            # Debug: log response structure
+            logger.debug(f"Agent response type: {type(response)}")
+            logger.debug(f"Agent response keys: {response.keys() if isinstance(response, dict) else 'N/A'}")
+            if isinstance(response, dict) and "messages" in response:
+                logger.debug(f"Messages count: {len(response['messages'])}")
+                logger.debug(f"Last message type: {type(response['messages'][-1])}")
 
             # Extract output from messages
             if isinstance(response, dict) and "messages" in response:
                 # Get last message content
                 last_message = response["messages"][-1]
-                if hasattr(last_message, 'content'):
-                    output = last_message.content
-                elif isinstance(last_message, dict):
-                    output = last_message.get("content", "Не удалось получить ответ.")
-                else:
-                    output = str(last_message)
-            else:
-                output = str(response)
 
-            logger.info(f"Message processed successfully in thread '{thread_id}'")
+                # Handle different message types
+                if hasattr(last_message, 'content'):
+                    # AIMessage or similar object
+                    output = str(last_message.content)
+                    logger.debug(f"Extracted output from AIMessage: {output[:100]}...")
+                elif isinstance(last_message, dict):
+                    # Dict message
+                    output = str(last_message.get("content", "Не удалось получить ответ."))
+                    logger.debug(f"Extracted output from dict: {output[:100]}...")
+                else:
+                    # Fallback
+                    output = str(last_message)
+                    logger.debug(f"Extracted output from fallback: {output[:100]}...")
+            else:
+                # If response is not in expected format
+                output = str(response)
+                logger.debug(f"Extracted output from str(response): {output[:100]}...")
+
+            # Ensure output is a string
+            if not isinstance(output, str):
+                output = str(output)
+
+            logger.info(f"Message processed successfully in thread '{thread_id}' - Output length: {len(output)}")
             return output
 
         except Exception as e:
