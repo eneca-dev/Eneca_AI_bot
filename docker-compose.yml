@@ -1,12 +1,56 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  ai-agent:
+  # Наш AI Бот
+  ai_agent:
     build: .
     container_name: ai_agent_bot
-    restart: always  # <-- Если упадет, сам поднимется. Если сервер перезагрузится, сам запустится.
-    env_file: ".env" 
-    ports:              # <--- ДОБАВЬ ЭТОТ РАЗДЕЛ
-      - "8000:8000"     # "Порт_Сервера:Порт_Контейнера"
+    restart: always
+    env_file:
+      - .env
+    # Мы убрали ports "8000:8000", теперь бот доступен ТОЛЬКО внутри Docker сети.
+    # Снаружи к нему не подключиться — это безопасно.
+    expose:
+      - "8000"
     volumes:
-      - .:/app       # (Опционально) Чтобы файлы были связаны
+      - .:/app 
+
+  # Nginx - Входные ворота (Reverse Proxy)
+  nginx:
+    image: nginx:stable-alpine
+    container_name: gateway_nginx
+    restart: always
+    ports:
+      - "80:80"   # Обычный веб-трафик
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/conf:/etc/letsencrypt # Папка для ключей SSL
+      - ./certbot/www:/var/www/certbot  # Папка для проверки домена
+    depends_on:
+      - ai_agent
+
+  # 3. Certbot (Выпуск сертификатов)
+  certbot:
+    image: certbot/certbot
+    container_name: certbot_utility
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+
+  # 4. Portainer (Визуальный мониторинг)
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: monitoring_portainer
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "9000:9000"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - portainer_data:/data
+
+volumes:
+  portainer_data:
