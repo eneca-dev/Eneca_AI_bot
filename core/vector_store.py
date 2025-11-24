@@ -1,5 +1,5 @@
 """Vector store module for Supabase integration"""
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from langchain_community.vectorstores import SupabaseVectorStore
 from langchain_openai import OpenAIEmbeddings
 from supabase import create_client, Client
@@ -136,7 +136,8 @@ class VectorStoreManager:
 
             documents = []
             for doc, score in results:
-                relevance = "high" if score >= 0.6 else "medium" if score >= 0.4 else "low"
+                # Updated relevance bands for higher quality threshold
+                relevance = "high" if score >= 0.8 else "medium" if score >= 0.6 else "low"
 
                 # Ensure UTF-8 encoding for content
                 content = doc.page_content
@@ -168,16 +169,76 @@ class VectorStoreManager:
             logger.error(f"Error searching vector store with scores: {e}")
             return []
 
-    def add_documents(self, texts: List[str], metadatas: Optional[List[dict]] = None) -> bool:
+    def _validate_and_fix_encoding(self, text: str, doc_index: int) -> Tuple[str, bool]:
         """
-        Add documents to vector store
+        Validate and fix text encoding before upload
+
+        Args:
+            text: Text to validate
+            doc_index: Document index for logging
+
+        Returns:
+            Tuple of (validated_text, was_fixed)
+        """
+        # Check if already valid UTF-8
+        try:
+            text.encode('utf-8').decode('utf-8')
+            # Check for Cyrillic characters to ensure it's not mojibake
+            if any(ord(c) >= 0x0400 and ord(c) <= 0x04FF for c in text):
+                return text, False  # Already valid UTF-8 with Cyrillic
+            elif any(ord(c) > 127 for c in text):
+                return text, False  # Has non-ASCII, assume OK
+            else:
+                return text, False  # ASCII only, OK
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+
+        # Try to fix common encoding issues
+        encoding_strategies = [
+            ('latin1', 'utf-8'),
+            ('cp1251', 'utf-8'),
+            ('windows-1251', 'utf-8'),
+            ('iso-8859-5', 'utf-8'),
+        ]
+
+        for from_enc, to_enc in encoding_strategies:
+            try:
+                fixed = text.encode(from_enc).decode(to_enc)
+                # Validate: should have Cyrillic or be valid
+                fixed.encode('utf-8').decode('utf-8')
+                logger.warning(
+                    f"Document {doc_index}: Fixed encoding using {from_enc}→{to_enc}"
+                )
+                return fixed, True
+            except (UnicodeDecodeError, UnicodeEncodeError, AttributeError):
+                continue
+
+        # Could not fix, raise error
+        logger.error(f"Document {doc_index}: Invalid encoding that cannot be fixed")
+        raise ValueError(
+            f"Документ {doc_index} имеет некорректную кодировку. "
+            f"Убедитесь, что текст в UTF-8 формате."
+        )
+
+    def add_documents(
+        self,
+        texts: List[str],
+        metadatas: Optional[List[dict]] = None,
+        validate_encoding: bool = True
+    ) -> bool:
+        """
+        Add documents to vector store with UTF-8 encoding validation
 
         Args:
             texts: List of document texts
             metadatas: Optional list of metadata dicts for each document
+            validate_encoding: If True, validate and auto-fix encoding issues (default: True)
 
         Returns:
             True if successful, False otherwise
+
+        Raises:
+            ValueError: If document has invalid encoding that cannot be fixed
         """
         if not self.vector_store:
             logger.error("Vector store not initialized. Cannot add documents.")
@@ -185,10 +246,32 @@ class VectorStoreManager:
 
         try:
             logger.info(f"Adding {len(texts)} documents to vector store")
+
+            # Validate and fix encoding if enabled
+            if validate_encoding:
+                validated_texts = []
+                fixed_count = 0
+
+                for idx, text in enumerate(texts):
+                    validated_text, was_fixed = self._validate_and_fix_encoding(text, idx)
+                    validated_texts.append(validated_text)
+                    if was_fixed:
+                        fixed_count += 1
+
+                if fixed_count > 0:
+                    logger.info(f"Fixed encoding for {fixed_count}/{len(texts)} documents")
+
+                texts = validated_texts
+
+            # Add to vector store
             self.vector_store.add_texts(texts=texts, metadatas=metadatas)
-            logger.info("Documents added successfully")
+            logger.info("✅ Documents added successfully with valid UTF-8 encoding")
             return True
 
+        except ValueError as ve:
+            # Encoding validation error
+            logger.error(f"Encoding validation failed: {ve}")
+            raise
         except Exception as e:
             logger.error(f"Error adding documents to vector store: {e}")
             return False

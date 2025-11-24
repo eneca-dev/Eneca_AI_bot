@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Eneca AI Bot is a RAG-enabled chatbot built with LangChain, Supabase (pgvector), and Python. It uses an orchestrator pattern to route between a general-purpose LLM and a specialized RAG agent for knowledge base queries. All prompts and user-facing messages are in Russian.
+Eneca AI Bot is a RAG-enabled chatbot built with LangChain, LangGraph, Supabase (pgvector), and Python. It features a dynamic agent registry system with an orchestrator that routes queries to specialized agents. The system supports conversation memory via SQLite checkpointing and can be deployed via Docker/Nginx. All prompts and user-facing messages are in Russian.
 
 ## Development Commands
 
@@ -25,20 +25,27 @@ pip install -r requirements.txt
 
 ### Running the Bot
 ```bash
-# CLI interface (standard version)
+# CLI interface with conversation memory
 python app.py
 
-# CLI interface with MCP support (async version)
-python app_mcp.py
+# FastAPI webhook server (for external integrations)
+python server.py
 
-# Test orchestrator routing
-python test_bot.py
+# Test scripts
+python tests/test_bot.py            # Test orchestrator routing
+python scripts/debug_supabase.py    # Debug Supabase vector search
+```
 
-# Test MCP integration
-python test_mcp.py
+### Docker Deployment
+```bash
+# Build and run with Docker Compose (includes Nginx reverse proxy)
+docker-compose up -d
 
-# Debug Supabase vector search
-python debug_supabase.py
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
 ```
 
 ### Configuration
@@ -46,73 +53,77 @@ python debug_supabase.py
 Copy `.env.example` to `.env` and configure:
 - `OPENAI_API_KEY` - Required for LLM and embeddings
 - `SUPABASE_URL` and `SUPABASE_KEY` - Optional, bot runs without vector store
-- `LOG_LEVEL` - Default: INFO
-
-**MCP Configuration for Claude Code:**
-
-Model Context Protocol (MCP) серверы настроены для Claude Code в `.mcp.json` (уровень проекта).
-
-**Установленные MCP серверы:**
-1. **context7** - Актуальная документация для библиотек (от Upstash)
-2. **langchain-docs** - Официальная документация LangChain и LangGraph (mcpdoc)
-
-**Requirements:**
-- Node.js >= v18.0.0 (для context7)
-- Python uv package manager (для mcpdoc): `pip install uv`
-
-**Проверка работы:**
-- Команда `/mcp` в Claude Code показывает список доступных серверов
-- См. `.mcp-servers-info.md` для подробностей об инструментах
-
-**Примечание:** Эти MCP серверы предназначены для Claude Code (для помощи в разработке), а не для бота.
+- `ENABLE_CONVERSATION_MEMORY` - Enable/disable conversation memory (default: true)
+- `MEMORY_TYPE` - Memory backend: `memory` (in-memory) or `sqlite` (persistent)
+- `MEMORY_DB_PATH` - SQLite database path for conversation history
+- `LOG_LEVEL` - Logging level (default: INFO)
 
 ## Architecture
 
-### Multi-Agent System
+### Dynamic Agent System
 
-The system implements a **three-tier agent hierarchy**:
+The system implements a **plugin-based agent architecture** with dynamic registration:
 
-1. **BaseAgent** (`agents/base.py`) - Abstract base class providing:
+1. **BaseAgent** ([agents/base.py](agents/base.py)) - Abstract base class providing:
    - LangChain ChatOpenAI initialization (model, temperature)
    - System prompt loading from markdown files in `prompts/`
    - Common `invoke()` method for LLM calls
 
-2. **OrchestratorAgent** (`agents/orchestrator.py`) - Main entry point:
-   - Uses LangChain's `create_openai_functions_agent` with function calling
-   - Routes simple queries directly, delegates complex queries to RAG agent
-   - Implements `AgentExecutor` with max 5 iterations
-   - System prompt: `prompts/orchestrator.md`
+2. **AgentRegistry** ([core/agent_registry.py](core/agent_registry.py)) - Dynamic agent management:
+   - Loads agent configurations from [config/agents.yaml](config/agents.yaml)
+   - Automatically creates LangChain tools from registered agents
+   - Supports priority-based agent registration
+   - Lazy instantiation of agent instances
+   - Enable/disable agents without code changes
 
-3. **RAGAgent** (`agents/rag_agent.py`) - Knowledge base specialist:
+3. **OrchestratorAgent** ([agents/orchestrator.py](agents/orchestrator.py):79) - Main entry point:
+   - Uses LangGraph's `create_react_agent` (ReAct pattern)
+   - Routes queries to appropriate agents via LLM tool selection
+   - Supports conversation memory with thread-based context
+   - System prompt: [prompts/orchestrator.md](prompts/orchestrator.md)
+
+4. **RAGAgent** ([agents/rag_agent.py](agents/rag_agent.py):45) - Knowledge base specialist:
    - Performs vector similarity search via Supabase pgvector
    - Temperature: 0.3 (lower for factual responses)
    - Strict policy: answers ONLY from retrieved documents
-   - System prompt: `prompts/rag_agent.md`
+   - System prompt: [prompts/rag_agent.md](prompts/rag_agent.md)
+
+5. **MemoryManager** ([core/memory.py](core/memory.py)) - Conversation persistence:
+   - Supports InMemorySaver (non-persistent) and SqliteSaver (persistent)
+   - Thread-based conversation tracking
+   - Graceful fallback if memory disabled
 
 ### Routing Mechanism
 
-The orchestrator uses **LangChain function calling** (not manual conditionals):
-- Tools registered in `_setup_tools()` with Russian-language descriptions
-- LLM decides whether to answer directly or call appropriate tool
-- Tool invocation → specialized agent/MCP server → formatted response → orchestrator finalizes
+The orchestrator uses **LangGraph ReAct agent** with automatic tool selection:
+- Tools auto-generated from [config/agents.yaml](config/agents.yaml) via [core/agent_registry.py](core/agent_registry.py):214
+- LLM analyzes query and selects appropriate tool via function calling
+- Tool invocation → specialized agent → formatted response → orchestrator finalizes
+- All tool descriptions in Russian for optimal routing accuracy
 
-**Available tool categories:**
-1. **RAG agent** (`knowledge_search`) - Internal knowledge base queries
-2. **MCP tools** (when using `app_mcp.py`) - External data sources and documentation
+**Current Tools:**
+- `knowledge_search` - RAG agent for knowledge base queries (priority: 10)
 
-To add new agents:
-1. Create class inheriting from `BaseAgent`
-2. Add tool in `OrchestratorAgent._setup_tools()`
-3. Create corresponding prompt file in `prompts/`
+**Adding New Agents:**
+1. Create agent class inheriting from `BaseAgent` in [agents/](agents/)
+2. Add entry to [config/agents.yaml](config/agents.yaml) with:
+   - `name` - Tool name for orchestrator
+   - `class_path` - Full Python import path (e.g., `agents.rag_agent.RAGAgent`)
+   - `enabled` - Enable/disable without code changes
+   - `priority` - Higher numbers loaded first
+   - `tool_description` - Russian description for LLM routing
+   - `config` - Agent-specific parameters
+3. Create system prompt file in [prompts/](prompts/)
+4. Restart bot - agent auto-registers via `agent_registry.load_from_yaml()`
 
-To add new MCP servers:
-1. Register in `core/mcp_manager.py` via `mcp_manager.register_server()`
-2. Or add to `.mcp.json` configuration file
-3. Restart bot with `python app_mcp.py`
+**Agent Requirements:**
+- Must inherit from `BaseAgent`
+- Implement `answer_question(query: str)` or `process_message(user_message: str)` method
+- Return string response
 
 ### RAG Implementation
 
-**Vector Store** (`core/vector_store.py`):
+**Vector Store** ([core/vector_store.py](core/vector_store.py)):
 - Singleton pattern: `vector_store_manager` instantiated at module level
 - Embeddings: OpenAI `text-embedding-3-small` (1536 dimensions)
 - Backend: Supabase with pgvector extension
@@ -120,18 +131,50 @@ To add new MCP servers:
 
 **Search Flow**:
 ```
-User Query → RAGAgent.search_knowledge_base()
+User Query → OrchestratorAgent.process_message()
+           → LangGraph ReAct agent selects knowledge_search tool
+           → RAGAgent.answer_question()
            → VectorStoreManager.search_with_score()
            → Supabase match_documents() with cosine similarity
            → Returns top-k documents with scores
-           → Relevance banding: High (≥0.6), Medium (≥0.4), Low (<0.4)
+           → Relevance banding: High (≥0.8), Medium (≥0.6), Low (<0.6)
+           → RAGAgent formats context + calls LLM
+           → Returns answer to orchestrator
 ```
 
-**Known Issue**: Encoding mismatch in stored documents (Windows-1251 vs UTF-8) causing garbled Russian text. Workaround: similarity threshold lowered to 0.35 instead of typical 0.7+. See `SUPABASE_SETUP_NOTES.md` for details.
+**Encoding Issue Resolution**: Documents with encoding issues can be fixed using the migration script:
+- Run `python scripts/fix_encoding_migration.py` for analysis (dry-run)
+- Run with `--execute` flag to perform migration with automatic backup
+- Automatic UTF-8 validation on all new document uploads
+- See [docs/ENCODING_MIGRATION_GUIDE.md](docs/ENCODING_MIGRATION_GUIDE.md) for full guide
+- After migration, similarity threshold is 0.7 for high-quality matches
+
+### Conversation Memory
+
+**Memory Architecture** ([core/memory.py](core/memory.py)):
+- Thread-based conversation tracking via LangGraph checkpointers
+- Each conversation has unique `thread_id` for context isolation
+- Orchestrator passes `thread_id` in config: `{"configurable": {"thread_id": "user123"}}`
+
+**Storage Backends:**
+1. **InMemorySaver** - Fast, non-persistent (lost on restart)
+2. **SqliteSaver** - Persistent to disk, survives restarts
+3. **PostgreSQL/Redis** - Planned but not implemented
+
+**Usage in Code:**
+```python
+# Process message with conversation context
+orchestrator.process_message(
+    user_message="Привет!",
+    thread_id="user123"  # Maintains conversation history for this user
+)
+```
+
+**Configuration:** Set `ENABLE_CONVERSATION_MEMORY=true` and `MEMORY_TYPE=sqlite` in `.env`
 
 ### Database Schema
 
-Expected Supabase schema (see `NEXT_STEPS.md` for full SQL):
+Expected Supabase schema (see [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) for full SQL):
 ```sql
 CREATE TABLE documents (
   id bigserial primary key,
@@ -147,108 +190,167 @@ CREATE FUNCTION match_documents(
 ) RETURNS TABLE (id bigint, content text, metadata jsonb, similarity float);
 ```
 
-**Graceful Degradation**: System checks `vector_store_manager.is_available()` before operations. If Supabase unavailable, orchestrator handles all queries directly.
+**Graceful Degradation**: System checks `vector_store_manager.is_available()` before operations. If Supabase unavailable, orchestrator handles all queries directly without RAG.
 
 ### Message Flow (End-to-End)
 
+**CLI Interface** ([app.py](app.py)):
 ```
-CLI Input → app.py REPL
-         → OrchestratorAgent.process_message()
-         → AgentExecutor.invoke()
-         → [LangChain decides: direct answer OR knowledge_search tool]
-         → [If tool called] RAGAgent.answer_question()
-                          → Vector search with scoring
-                          → Format context + prompt
-                          → LLM generates answer
-         → Return final response
-         → Display in CLI
+User Input → app.py REPL
+          → OrchestratorAgent.process_message(message, thread_id)
+          → LangGraph ReAct agent.invoke()
+          → [ReAct Loop]:
+               1. LLM analyzes query
+               2. Decides: direct answer OR call tool
+               3. If tool: knowledge_search → RAGAgent
+                    → Vector search + context formatting
+                    → LLM generates answer from context
+               4. Return to orchestrator
+               5. Final response formatting
+          → Memory checkpoint saved (if enabled)
+          → Display in CLI
+```
+
+**Webhook Interface** ([server.py](server.py)):
+```
+HTTP POST /webhook → FastAPI endpoint
+                  → Extract message + user_id
+                  → OrchestratorAgent.process_message(message, thread_id=user_id)
+                  → [Same ReAct flow as above]
+                  → Memory checkpoint saved
+                  → Return JSON response
 ```
 
 ### Configuration System
 
-**Pattern**: Pydantic `BaseSettings` in `core/config.py`
+**Pattern**: Pydantic `BaseSettings` in [core/config.py](core/config.py)
 - Loads from environment variables and `.env` file (UTF-8)
 - Global singleton: `from core.config import settings`
 - Validates required fields and checks for placeholder values
 
-**Key Fields**:
-- `openai_api_key` - Required
+**Key Configuration Fields**:
+- `openai_api_key` - Required for LLM/embeddings
 - `supabase_url`, `supabase_key` - Optional (graceful fallback)
+- `orchestrator_model`, `orchestrator_temperature` - Orchestrator LLM config
+- `rag_agent_model`, `rag_agent_temperature` - RAG agent LLM config
+- `enable_conversation_memory` - Toggle memory system
+- `memory_type` - Backend: `memory` or `sqlite`
+- `memory_db_path` - SQLite database location
 - `debug`, `log_level`, `environment` - Development settings
 
-**Logging**: Configured via loguru in `app.py`
+**Agent Configuration**: [config/agents.yaml](config/agents.yaml)
+- YAML-based agent registration
+- No code changes needed to add/remove agents
+- Priority-based tool ordering
+
+**Logging**: Configured via loguru in [app.py](app.py)
 - File: `logs/app.log` (10MB rotation, 7 days retention)
 - Structured JSON-like output with colors
 
 ## Code Patterns
 
 ### Prompt Externalization
-All agent system prompts stored as Markdown in `prompts/`:
-- `orchestrator.md` - Routing logic and tool usage instructions
-- `rag_agent.md` - RAG behavior and answer formatting rules
+All agent system prompts stored as Markdown in [prompts/](prompts/):
+- [orchestrator.md](prompts/orchestrator.md) - Routing logic and tool usage instructions
+- [rag_agent.md](prompts/rag_agent.md) - RAG behavior and answer formatting rules
 
 Agents load via `_get_default_prompt()` with hardcoded fallbacks. Modify prompts without changing code.
 
 ### Singleton Pattern
-- `vector_store_manager` - Single Supabase connection
-- `settings` - Single config instance
-- Import pre-instantiated objects, don't create new instances
+Critical singletons instantiated at module level:
+- `vector_store_manager` ([core/vector_store.py](core/vector_store.py)) - Single Supabase connection
+- `memory_manager` ([core/memory.py](core/memory.py)) - Single checkpointer instance
+- `agent_registry` ([core/agent_registry.py](core/agent_registry.py)) - Single agent registry
+- `settings` ([core/config.py](core/config.py)) - Single config instance
+
+**IMPORTANT**: Always import these pre-instantiated objects, never create new instances.
+
+### Agent Registration Pattern
+Dynamic agent loading via YAML configuration:
+1. Define agent in [config/agents.yaml](config/agents.yaml)
+2. AgentRegistry loads configuration at startup
+3. Orchestrator auto-creates tools via `agent_registry.create_tools_for_agents()`
+4. Tools dynamically invoke agents via lazy instantiation
 
 ### Error Handling
 - All user-facing errors in Russian
-- Graceful degradation (vector store optional)
+- Graceful degradation (vector store optional, memory optional)
 - Logging with context (agent name, query, errors)
+- Try/except blocks return user-friendly error messages
 
 ## Current Limitations
 
 ### Not Yet Implemented
-- **Platform handlers**: No Telegram/Discord integration despite README claims (only CLI exists)
-- **Conversation memory**: Each message is stateless, no history tracking
+- **Platform handlers**: No Telegram/Discord bot integration (only CLI + webhook server)
 - **User profiles**: No `users` or `conversations` tables in database
-- **Tool ecosystem**: `tools/` directory contains only empty placeholder files
-- **Tests**: Test files are empty shells
+- **Advanced memory**: PostgreSQL/Redis checkpointers not implemented
+- **Tests**: Test files exist but coverage is minimal
 
 ### Technical Debt
 - Encoding issues in Supabase documents (garbled Russian text)
 - Similarity threshold workaround (0.35 instead of proper 0.7+)
-- Hardcoded configuration: agent models, embedding model, thresholds
-- Empty modules: `core/memory.py`, `schemas/models.py`, `tools/*.py`
+- Empty placeholder directories: `schemas/`, some `scripts/`
 
-### Architectural Constraints
-- Single RAG agent hardcoded in orchestrator (not truly multi-agent yet)
-- No dynamic agent registration mechanism
-- Model selection not configurable (hardcoded to `gpt-4o-mini`)
+### Architecture Notes
+- Memory system is thread-based, not user-based (no built-in user authentication)
+- Webhook server exists ([server.py](server.py)) but no platform-specific handlers
+- Agent registry loads all enabled agents at startup (no hot-reloading)
 
-## Project Structure Notes
+## Project Structure
 
 ```
 Eneca_AI_bot/
-├── agents/          # Agent implementations (BaseAgent, OrchestratorAgent, RAGAgent)
-├── core/            # Singleton managers (config, vector_store, memory*)
-├── prompts/         # Markdown system prompts for agents
-├── schemas/         # Empty - intended for Pydantic models
-├── tools/           # Empty - intended for LangChain tools
-├── scripts/         # Empty - intended for data ingestion
-├── logs/            # Rotated log files (gitignored)
-├── app.py           # CLI entry point
-└── test_bot.py      # Orchestrator routing tests
+├── agents/           # Agent implementations
+│   ├── base.py       # Abstract BaseAgent class
+│   ├── orchestrator.py  # Main routing agent with LangGraph ReAct
+│   └── rag_agent.py  # RAG knowledge base agent
+├── core/             # Core singleton managers
+│   ├── config.py     # Pydantic settings from .env
+│   ├── vector_store.py  # Supabase pgvector integration
+│   ├── memory.py     # LangGraph checkpointer management
+│   └── agent_registry.py  # Dynamic agent loading from YAML
+├── config/           # Configuration files
+│   └── agents.yaml   # Agent definitions and tool descriptions
+├── prompts/          # Markdown system prompts (external from code)
+│   ├── orchestrator.md  # Orchestrator routing instructions
+│   └── rag_agent.md     # RAG answer formatting rules
+├── docs/             # Documentation
+├── scripts/          # Utility scripts (debug_supabase.py, etc.)
+├── tests/            # Test files
+├── logs/             # Rotated log files (gitignored)
+├── data/             # Conversation memory SQLite databases
+├── app.py            # CLI entry point with REPL
+├── server.py         # FastAPI webhook server
+├── docker-compose.yml  # Docker deployment with Nginx
+└── requirements.txt  # Python dependencies
 ```
 
-*Empty or partially implemented
+## Key Files Reference
 
-## Important Files
+**Core Architecture:**
+- [agents/base.py](agents/base.py) - Abstract agent base class
+- [agents/orchestrator.py](agents/orchestrator.py):79 - Main routing logic with LangGraph
+- [agents/rag_agent.py](agents/rag_agent.py):45 - Vector search and RAG pipeline
+- [core/agent_registry.py](core/agent_registry.py):214 - Dynamic agent/tool creation
+- [core/memory.py](core/memory.py) - Conversation checkpointing
+- [core/vector_store.py](core/vector_store.py) - Supabase pgvector integration
+- [core/config.py](core/config.py) - Pydantic settings management
 
-- `agents/orchestrator.py:43` - Tool registration for routing
-- `agents/rag_agent.py:45` - Vector search with relevance scoring
-- `core/vector_store.py:23` - Supabase pgvector integration
-- `core/config.py` - Environment-driven configuration
-- `core/mcp_manager.py` - MCP servers management and integration
-- `app_mcp.py` - Async CLI with MCP support
-- `prompts/orchestrator.md` - Routing decision logic (Russian)
-- `prompts/rag_agent.md` - RAG answer formatting rules (Russian)
-- `docs/MCP_INTEGRATION.md` - MCP setup and usage guide
-- `SUPABASE_SETUP_NOTES.md` - Known encoding issues and workarounds
-- `NEXT_STEPS.md` - Planned features and Telegram handler example
+**Configuration:**
+- [config/agents.yaml](config/agents.yaml) - Agent registry configuration
+- [.env](.env) - Environment variables (API keys, database URLs)
+
+**Entry Points:**
+- [app.py](app.py) - CLI interface with REPL
+- [server.py](server.py) - FastAPI webhook server
+
+**Prompts (Russian):**
+- [prompts/orchestrator.md](prompts/orchestrator.md) - Routing and tool selection logic
+- [prompts/rag_agent.md](prompts/rag_agent.md) - RAG answer formatting rules
+
+**Documentation:**
+- [docs/SUPABASE_SETUP_NOTES.md](docs/SUPABASE_SETUP_NOTES.md) - Encoding issues and workarounds
+- [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) - Planned features
 
 ## Language Conventions
 

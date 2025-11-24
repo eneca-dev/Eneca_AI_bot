@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     embedding_model: str = Field("text-embedding-3-small", alias="EMBEDDING_MODEL")
     embedding_dimensions: int = Field(1536, alias="EMBEDDING_DIMENSIONS")
     vector_search_k: int = Field(5, alias="VECTOR_SEARCH_K")
-    similarity_threshold: float = Field(0.35, alias="SIMILARITY_THRESHOLD")
+    # Similarity threshold: 0.7-0.9 for high-quality matches (lowered to 0.35 if encoding issues exist)
+    similarity_threshold: float = Field(0.7, alias="SIMILARITY_THRESHOLD")
 
     # Memory Configuration
     enable_conversation_memory: bool = Field(True, alias="ENABLE_CONVERSATION_MEMORY")
