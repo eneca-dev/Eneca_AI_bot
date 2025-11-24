@@ -1,6 +1,7 @@
 import sys
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # <--- НОВЫЙ ИМПОРТ
 from pydantic import BaseModel
 from loguru import logger
 from contextlib import asynccontextmanager
@@ -19,10 +20,10 @@ def setup_logging():
     )
     logger.add("logs/app.log", rotation="10 MB", retention="7 days", level=settings.log_level)
 
-# --- Модели данных (Что мы принимаем от приложения) ---
+# --- Модели данных ---
 class ChatRequest(BaseModel):
     message: str
-    thread_id: str  # ID пользователя или чата, чтобы у каждого была своя память
+    thread_id: str
 
 class ChatResponse(BaseModel):
     response: str
@@ -30,10 +31,9 @@ class ChatResponse(BaseModel):
 # --- Глобальные переменные ---
 agent = None
 
-# --- Жизненный цикл (Запуск и остановка) ---
+# --- Жизненный цикл ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Эта часть срабатывает при запуске сервера
     setup_logging()
     logger.info("Starting Eneca AI API Server")
     
@@ -45,21 +45,35 @@ async def lifespan(app: FastAPI):
         logger.critical(f"Failed to initialize Agent: {e}")
         raise e
         
-    yield  # Тут сервер работает
-    
-    # Эта часть срабатывает при выключении
+    yield
     logger.info("Shutting down API Server")
 
 # --- Инициализация приложения ---
 app = FastAPI(title="Eneca AI Bot API", lifespan=lifespan)
 
-# --- Эндпоинт (Ручка), в которую будет стучаться твое приложение ---
+# ==========================================
+# 🔥 НАСТРОЙКА CORS (ДОСТУП ДЛЯ ENECA.WORK)
+# ==========================================
+origins = [
+    "https://eneca.work",          # Ваш основной сайт
+    "https://www.eneca.work",      # С www
+    "http://localhost:3000",       # Для локальной разработки фронтенда
+    "http://localhost:8080",
+    "https://ai-bot.eneca.work"    # Сам бот
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,         # Разрешаем запросы только с этих сайтов
+    allow_credentials=True,
+    allow_methods=["*"],           # Разрешаем любые методы (POST, GET, OPTIONS)
+    allow_headers=["*"],           # Разрешаем любые заголовки
+)
+# ==========================================
+
+# --- Эндпоинт ---
 @app.post("/api/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
-    """
-    Принимает JSON: {"message": "Привет", "thread_id": "user123"}
-    Возвращает JSON: {"response": "Ответ бота"}
-    """
     global agent
     
     if not agent:
@@ -68,8 +82,7 @@ def chat_endpoint(request: ChatRequest):
     try:
         logger.info(f"Processing message for thread {request.thread_id}")
         
-        # Вызываем твоего агента
-        # Fastapi автоматически запустит это в отдельном потоке, чтобы не блокировать сервер
+        # Запускаем обработку сообщения
         bot_response = agent.process_message(
             request.message, 
             thread_id=request.thread_id
@@ -81,7 +94,5 @@ def chat_endpoint(request: ChatRequest):
         logger.error(f"Error processing message: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- Точка входа ---
 if __name__ == "__main__":
-    # Запускаем сервер на всех сетевых интерфейсах (0.0.0.0) на порту 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
