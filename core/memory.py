@@ -16,6 +16,37 @@ class MemoryManager:
         self._context_manager = None  # Keep reference to context manager for SQLite
         self._initialize()
 
+    def _init_supabase_checkpointer(self):
+        """Initialize Supabase checkpointer with n8n_chat_histories table"""
+        try:
+            # Import here to avoid circular dependency
+            from core.vector_store import vector_store_manager
+            from core.supabase_checkpointer import SupabaseCheckpointer
+
+            # Check if Supabase is available
+            if not vector_store_manager.is_available():
+                raise RuntimeError(
+                    "Supabase not available. "
+                    "Check SUPABASE_URL and SUPABASE_KEY in .env"
+                )
+
+            # Use the same Supabase client as vector store
+            supabase_client = vector_store_manager.supabase_client
+
+            # Initialize custom Supabase checkpointer
+            self.checkpointer = SupabaseCheckpointer(
+                supabase_client=supabase_client,
+                table_name=settings.memory_supabase_table
+            )
+
+            logger.info(
+                f"Initialized SupabaseCheckpointer with table: {settings.memory_supabase_table}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Supabase checkpointer: {e}")
+            raise
+
     def _initialize(self):
         """Initialize checkpointer based on memory_type setting"""
         if not settings.enable_conversation_memory:
@@ -41,9 +72,14 @@ class MemoryManager:
                 self.checkpointer = self._context_manager.__enter__()
                 logger.info(f"Initialized SqliteSaver with database at {db_path}")
 
+            elif memory_type == "supabase":
+                # Supabase checkpointer (uses n8n_chat_histories table)
+                self._init_supabase_checkpointer()
+
             elif memory_type == "postgres":
-                # TODO: Implement PostgreSQL checkpointer
-                logger.warning("PostgreSQL checkpointer not yet implemented, falling back to InMemorySaver")
+                # Generic PostgreSQL checkpointer
+                logger.warning("Generic PostgreSQL checkpointer not implemented, use 'supabase' instead")
+                logger.warning("Falling back to InMemorySaver")
                 self.checkpointer = InMemorySaver()
 
             elif memory_type == "redis":

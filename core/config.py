@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     rag_agent_model: str = Field("gpt-4o", alias="RAG_AGENT_MODEL")
     rag_agent_temperature: float = Field(0.3, alias="RAG_AGENT_TEMPERATURE")
     max_agent_iterations: int = Field(5, alias="MAX_AGENT_ITERATIONS")
+    agent_max_iterations: int = Field(10, alias="AGENT_MAX_ITERATIONS")
+    agent_timeout: int = Field(300, alias="AGENT_TIMEOUT")
 
     # Embedding & Vector Store Configuration
     embedding_model: str = Field("text-embedding-3-small", alias="EMBEDDING_MODEL")
@@ -41,8 +43,12 @@ class Settings(BaseSettings):
 
     # Memory Configuration
     enable_conversation_memory: bool = Field(True, alias="ENABLE_CONVERSATION_MEMORY")
-    memory_type: str = Field("memory", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "postgres", "redis"
+    memory_type: str = Field("memory", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "supabase"
     memory_db_path: str = Field("data/checkpoints.db", alias="MEMORY_DB_PATH")
+
+    # Supabase Memory Configuration (when MEMORY_TYPE=supabase)
+    # Uses n8n_chat_histories table for conversation persistence
+    memory_supabase_table: str = Field("n8n_chat_histories", alias="MEMORY_SUPABASE_TABLE")
 
     class Config:
         env_file = ".env"
