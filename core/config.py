@@ -9,9 +9,14 @@ class Settings(BaseSettings):
     # OpenAI Configuration
     openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
 
-    # Supabase Configuration
-    supabase_url: Optional[str] = Field(None, alias="SUPABASE_URL")
-    supabase_key: Optional[str] = Field(None, alias="SUPABASE_KEY")
+    # Supabase Configuration - DEV/PROD Separation
+    # DEV Supabase - for RAG (documents table)
+    supabase_rag_url: Optional[str] = Field(None, alias="SUPABASE_RAG_URL")
+    supabase_rag_key: Optional[str] = Field(None, alias="SUPABASE_RAG_KEY")
+
+    # PROD Supabase - for chat (chat_messages table)
+    supabase_chat_url: Optional[str] = Field(None, alias="SUPABASE_CHAT_URL")
+    supabase_chat_service_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_SERVICE_KEY")  # Bypasses RLS for bot writes
 
     # Bot Configuration
     bot_token: Optional[str] = Field(None, alias="BOT_TOKEN")

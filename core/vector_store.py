@@ -27,16 +27,16 @@ class VectorStoreManager:
             )
             logger.info(f"OpenAI embeddings initialized ({settings.embedding_model})")
 
-            # Initialize Supabase client if credentials are available and valid
-            if (settings.supabase_url and
-                settings.supabase_key and
-                not settings.supabase_url.startswith("your_") and
-                not settings.supabase_key.startswith("your_")):
+            # Initialize Supabase client if DEV credentials are available and valid
+            if (settings.supabase_rag_url and
+                settings.supabase_rag_key and
+                not settings.supabase_rag_url.startswith("your_") and
+                not settings.supabase_rag_key.startswith("your_")):
 
                 try:
                     self.supabase_client = create_client(
-                        supabase_url=settings.supabase_url,
-                        supabase_key=settings.supabase_key
+                        supabase_url=settings.supabase_rag_url,
+                        supabase_key=settings.supabase_rag_key
                     )
                     logger.info("Supabase client initialized")
 
