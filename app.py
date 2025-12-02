@@ -55,13 +55,14 @@ class WebhookResponse(BaseModel):
 
 # --- Глобальные переменные ---
 agent = None
+realtime_listener = None  # Realtime subscription listener
 
 # --- Жизненный цикл ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Starting Eneca AI API Server")
-    
+
     global agent
     try:
         agent = OrchestratorAgent()
@@ -69,8 +70,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.critical(f"Failed to initialize Agent: {e}")
         raise e
-        
+
+    # Start Realtime listener
+    global realtime_listener
+    try:
+        from core.realtime_listener import RealtimeListener
+        realtime_listener = RealtimeListener(agent)
+        realtime_listener.start()
+        logger.info("✅ Realtime listener started successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to start Realtime listener: {e}")
+        # Don't crash - webhook endpoint exists as fallback
+
     yield
+
+    # Stop Realtime listener on shutdown
+    if realtime_listener:
+        realtime_listener.stop()
+
     logger.info("Shutting down API Server")
 
 # --- Инициализация приложения ---
