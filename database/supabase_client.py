@@ -44,7 +44,7 @@ class SupabaseDBClient:
 
     def insert_message(
         self,
-        thread_id: str,
+        conversation_id: str,
         content: str,
         user_id: str,
         role: str = "assistant",
@@ -54,11 +54,11 @@ class SupabaseDBClient:
         Insert a message into chat_messages table
 
         Args:
-            thread_id: Conversation thread ID
+            conversation_id: Conversation ID (UUID)
             content: Message text
-            user_id: User identifier
+            user_id: User identifier (UUID)
             role: Message role ('user' or 'assistant')
-            metadata: Optional metadata dictionary
+            metadata: Optional metadata dictionary (for backward compat)
 
         Returns:
             Inserted record or None on failure
@@ -69,33 +69,35 @@ class SupabaseDBClient:
 
         try:
             data = {
-                "thread_id": thread_id,
-                "content": content,
+                "conversation_id": conversation_id,
                 "user_id": user_id,
                 "role": role,
-                "metadata": metadata or {}
+                "kind": "message",             # Required field
+                "content": content,
+                "is_final": True,               # Required field
+                "meta": metadata or {}          # Required field (JSONB)
             }
 
             response = self.client.table("chat_messages").insert(data).execute()
 
-            logger.info(f"Message inserted successfully - thread: {thread_id}, role: {role}")
+            logger.info(f"Message inserted successfully - conversation: {conversation_id}, role: {role}")
             return response.data[0] if response.data else None
 
         except Exception as e:
             logger.error(f"Failed to insert message to Supabase: {e}")
-            logger.error(f"Data attempted: thread_id={thread_id}, role={role}, user_id={user_id}")
+            logger.error(f"Data attempted: conversation_id={conversation_id}, role={role}, user_id={user_id}")
             return None
 
     def get_conversation_history(
         self,
-        thread_id: str,
+        conversation_id: str,
         limit: int = 20
     ) -> list:
         """
-        Get conversation history for a thread
+        Get conversation history for a conversation
 
         Args:
-            thread_id: Conversation thread ID
+            conversation_id: Conversation ID (UUID)
             limit: Maximum number of messages to retrieve
 
         Returns:
@@ -109,13 +111,13 @@ class SupabaseDBClient:
             response = (
                 self.client.table("chat_messages")
                 .select("*")
-                .eq("thread_id", thread_id)
+                .eq("conversation_id", conversation_id)
                 .order("created_at", desc=False)
                 .limit(limit)
                 .execute()
             )
 
-            logger.debug(f"Retrieved {len(response.data)} messages for thread: {thread_id}")
+            logger.debug(f"Retrieved {len(response.data)} messages for conversation: {conversation_id}")
             return response.data
 
         except Exception as e:

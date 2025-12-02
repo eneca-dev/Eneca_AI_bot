@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # PROD Supabase - for chat (chat_messages table)
     supabase_chat_url: Optional[str] = Field(None, alias="SUPABASE_CHAT_URL")
+    supabase_chat_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_KEY")  # ANON_KEY for Realtime subscriptions
     supabase_chat_service_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_SERVICE_KEY")  # Bypasses RLS for bot writes
 
     # Bot Configuration
