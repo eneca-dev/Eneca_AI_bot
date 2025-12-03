@@ -157,9 +157,12 @@ User Query → OrchestratorAgent.process_message()
 - Orchestrator passes `thread_id` in config: `{"configurable": {"thread_id": "user123"}}`
 
 **Storage Backends:**
-1. **InMemorySaver** - Fast, non-persistent (lost on restart)
-2. **SqliteSaver** - Persistent to disk, survives restarts
-3. **PostgreSQL/Redis** - Planned but not implemented
+1. **InMemorySaver** - Fast, non-persistent (lost on restart) - для development
+2. **SqliteSaver** - Persistent to disk, survives restarts - для single-instance production
+3. **SupabaseCheckpointer** - PostgreSQL через Supabase, multi-instance ready - для production scale
+   - Использует таблицу `n8n_chat_histories`
+   - Custom implementation в [core/supabase_checkpointer.py](core/supabase_checkpointer.py)
+   - Совместим с n8n workflows
 
 **Usage in Code:**
 ```python
@@ -170,7 +173,15 @@ orchestrator.process_message(
 )
 ```
 
-**Configuration:** Set `ENABLE_CONVERSATION_MEMORY=true` and `MEMORY_TYPE=sqlite` in `.env`
+**Configuration:**
+```bash
+# In .env
+ENABLE_CONVERSATION_MEMORY=true
+MEMORY_TYPE=supabase  # or sqlite, memory
+MEMORY_SUPABASE_TABLE=n8n_chat_histories
+```
+
+**Setup:** See [docs/SUPABASE_MEMORY_SETUP.md](docs/SUPABASE_MEMORY_SETUP.md) for complete guide
 
 ### Database Schema
 
