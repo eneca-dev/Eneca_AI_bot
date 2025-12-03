@@ -9,6 +9,7 @@ from typing import Optional, Set
 from datetime import datetime, timedelta
 from loguru import logger
 from supabase import create_client, Client
+from langchain_core.messages import HumanMessage, AIMessage
 from core.config import settings
 from agents.orchestrator import OrchestratorAgent
 from database.supabase_client import supabase_db_client
@@ -30,6 +31,7 @@ class RealtimeListener:
         self._thread: Optional[threading.Thread] = None
         self._processed_ids: Set[str] = set()  # Track processed message IDs
         self._poll_interval = 2  # Poll every 2 seconds
+        self._start_time = datetime.utcnow()  # Only process messages after bot starts
 
     def start(self):
         """Start polling listener in background thread"""
@@ -61,17 +63,20 @@ class RealtimeListener:
         """Poll for new messages in background thread"""
         while self.running:
             try:
-                # Query for last 5 user messages (timezone-independent test)
-                # NOTE: Will process same messages repeatedly - relies on _processed_ids for deduplication
+                # Calculate cutoff time (messages created after bot started)
+                cutoff_time = self._start_time.strftime("%Y-%m-%dT%H:%M:%S")
+
+                # Query for new user messages created after bot started
                 response = self.client.table('chat_messages')\
                     .select('*')\
                     .eq('role', 'user')\
-                    .order('created_at', desc=True)\
-                    .limit(5)\
+                    .gte('created_at', cutoff_time)\
+                    .order('created_at', desc=False)\
+                    .limit(10)\
                     .execute()
 
                 # Debug logging
-                logger.info(f"🔍 Polling check - Found {len(response.data) if response.data else 0} user messages (last 5)")
+                logger.info(f"🔍 Polling check - Found {len(response.data) if response.data else 0} new user messages since {cutoff_time}")
 
                 if response.data:
                     for message in response.data:
@@ -100,7 +105,7 @@ class RealtimeListener:
     def _handle_message(self, record: dict):
         """
         Handle new user message
-        Processes with agent and writes response to database
+        Loads conversation history from chat_messages table and processes with agent
         """
         try:
             conversation_id = record['conversation_id']
@@ -109,11 +114,44 @@ class RealtimeListener:
 
             logger.info(f"📨 Processing message from conversation: {conversation_id}")
 
-            # Process message with orchestrator agent
-            bot_response = self.agent.process_message(
-                user_message=user_message,
-                thread_id=conversation_id  # Pass as thread_id for backward compat
+            # Load conversation history from Supabase
+            messages = []
+            if supabase_db_client.is_available():
+                history = supabase_db_client.get_conversation_history(conversation_id, limit=20)
+                for msg in history:
+                    if msg.get('role') == 'user':
+                        messages.append(HumanMessage(content=msg.get('content', '')))
+                    elif msg.get('role') == 'assistant':
+                        messages.append(AIMessage(content=msg.get('content', '')))
+                logger.info(f"📜 Loaded {len(messages)} messages from history")
+                # Debug: show what messages we loaded
+                for i, msg in enumerate(messages):
+                    msg_type = "USER" if isinstance(msg, HumanMessage) else "BOT"
+                    preview = msg.content[:80].replace('\n', ' ')
+                    logger.debug(f"  [{i}] {msg_type}: {preview}...")
+
+            # Add current user message if not already in history
+            if not messages or messages[-1].content != user_message:
+                messages.append(HumanMessage(content=user_message))
+                logger.debug(f"  [+] Added current message: {user_message[:80]}...")
+
+            logger.info(f"📤 Sending {len(messages)} total messages to agent")
+
+            # Process with orchestrator agent (with full history)
+            response = self.agent.agent.invoke(
+                {"messages": messages},
+                config={"configurable": {"thread_id": conversation_id}}
             )
+
+            # Extract bot response from agent output
+            if isinstance(response, dict) and "messages" in response:
+                last_message = response["messages"][-1]
+                if hasattr(last_message, 'content'):
+                    bot_response = str(last_message.content)
+                else:
+                    bot_response = str(last_message)
+            else:
+                bot_response = str(response)
 
             logger.info(f"🤖 Generated response (length: {len(bot_response)} chars)")
 

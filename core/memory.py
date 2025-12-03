@@ -18,6 +18,7 @@ class MemoryManager:
 
     def _initialize(self):
         """Initialize checkpointer based on memory_type setting"""
+        logger.debug(f"Memory config: enable={settings.enable_conversation_memory}, type={settings.memory_type}")
         if not settings.enable_conversation_memory:
             logger.info("Conversation memory is disabled")
             return
@@ -42,9 +43,21 @@ class MemoryManager:
                 logger.info(f"Initialized SqliteSaver with database at {db_path}")
 
             elif memory_type == "postgres":
-                # TODO: Implement PostgreSQL checkpointer
-                logger.warning("PostgreSQL checkpointer not yet implemented, falling back to InMemorySaver")
-                self.checkpointer = InMemorySaver()
+                # PostgreSQL checkpointer using Supabase
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                if not settings.postgres_connection_string:
+                    logger.error("POSTGRES_CONNECTION_STRING not configured, falling back to InMemorySaver")
+                    self.checkpointer = InMemorySaver()
+                    return
+
+                # Create PostgresSaver with connection string
+                self._context_manager = PostgresSaver.from_conn_string(settings.postgres_connection_string)
+                self.checkpointer = self._context_manager.__enter__()
+
+                # Create tables if they don't exist
+                self.checkpointer.setup()
+                logger.info("Initialized PostgresSaver with Supabase PostgreSQL (tables created)")
 
             elif memory_type == "redis":
                 # TODO: Implement Redis checkpointer
