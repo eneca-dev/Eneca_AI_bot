@@ -1,6 +1,16 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Optional
+from pathlib import Path
+import os
+
+# Get absolute path to project root (.env location)
+_CONFIG_DIR = Path(__file__).parent.parent
+_ENV_FILE = _CONFIG_DIR / ".env"
+
+# Debug: Print .env path at module load time
+print(f"DEBUG: Loading .env from: {_ENV_FILE}")
+print(f"DEBUG: .env exists: {_ENV_FILE.exists()}")
 
 
 class Settings(BaseSettings):
@@ -48,16 +58,22 @@ class Settings(BaseSettings):
     similarity_threshold: float = Field(0.7, alias="SIMILARITY_THRESHOLD")
 
     # Memory Configuration
-    enable_conversation_memory: bool = Field(True, alias="ENABLE_CONVERSATION_MEMORY")
-    memory_type: str = Field("memory", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "supabase"
-    memory_db_path: str = Field("data/checkpoints.db", alias="MEMORY_DB_PATH")
+    enable_conversation_memory: bool = Field(default=True, alias="ENABLE_CONVERSATION_MEMORY")
+    memory_type: str = Field(default="memory", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "postgres", "redis"
+    memory_db_path: str = Field(default="data/checkpoints.db", alias="MEMORY_DB_PATH")
+
+    # PostgreSQL Configuration (for PostgreSQL checkpointer)
+    # Note: Supabase PostgreSQL connection uses the following format:
+    # postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
+    postgres_connection_string: Optional[str] = Field(None, alias="POSTGRES_CONNECTION_STRING")
 
     # Supabase Memory Configuration (when MEMORY_TYPE=supabase)
     # Uses n8n_chat_histories table for conversation persistence
     memory_supabase_table: str = Field("n8n_chat_histories", alias="MEMORY_SUPABASE_TABLE")
 
     class Config:
-        env_file = ".env"
+        # Use absolute path to ensure .env is found regardless of working directory
+        env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
         case_sensitive = False
         extra = "ignore"  # Ignore extra fields in .env
