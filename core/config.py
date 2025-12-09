@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     rag_agent_model: str = Field("gpt-4o", alias="RAG_AGENT_MODEL")
     rag_agent_temperature: float = Field(0.3, alias="RAG_AGENT_TEMPERATURE")
     max_agent_iterations: int = Field(5, alias="MAX_AGENT_ITERATIONS")
+    agent_max_iterations: int = Field(10, alias="AGENT_MAX_ITERATIONS")
+    agent_timeout: int = Field(300, alias="AGENT_TIMEOUT")
 
     # Embedding & Vector Store Configuration
     embedding_model: str = Field("text-embedding-3-small", alias="EMBEDDING_MODEL")
@@ -64,6 +66,10 @@ class Settings(BaseSettings):
     # Note: Supabase PostgreSQL connection uses the following format:
     # postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
     postgres_connection_string: Optional[str] = Field(None, alias="POSTGRES_CONNECTION_STRING")
+
+    # Supabase Memory Configuration (when MEMORY_TYPE=supabase)
+    # Uses n8n_chat_histories table for conversation persistence
+    memory_supabase_table: str = Field("n8n_chat_histories", alias="MEMORY_SUPABASE_TABLE")
 
     class Config:
         # Use absolute path to ensure .env is found regardless of working directory
