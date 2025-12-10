@@ -82,13 +82,20 @@ The system implements a **plugin-based agent architecture** with dynamic registr
    - Supports conversation memory with thread-based context
    - System prompt: [prompts/orchestrator.md](prompts/orchestrator.md)
 
-4. **RAGAgent** ([agents/rag_agent.py](agents/rag_agent.py):45) - Knowledge base specialist:
+4. **MCPAgent** ([agents/mcp_agent.py](agents/mcp_agent.py)) - Project management specialist:
+   - Connects to external MCP server via JSON-RPC 2.0
+   - Manages 21 tools for projects, stages, objects, sections, employees
+   - Temperature: 0.3 (lower for precise tool selection)
+   - LLM-based query parsing for tool + arguments extraction
+   - System prompt: [prompts/mcp_agent.md](prompts/mcp_agent.md)
+
+5. **RAGAgent** ([agents/rag_agent.py](agents/rag_agent.py):45) - Knowledge base specialist:
    - Performs vector similarity search via Supabase pgvector
    - Temperature: 0.3 (lower for factual responses)
    - Strict policy: answers ONLY from retrieved documents
    - System prompt: [prompts/rag_agent.md](prompts/rag_agent.md)
 
-5. **MemoryManager** ([core/memory.py](core/memory.py)) - Conversation persistence:
+6. **MemoryManager** ([core/memory.py](core/memory.py)) - Conversation persistence:
    - Supports InMemorySaver (non-persistent) and SqliteSaver (persistent)
    - Thread-based conversation tracking
    - Graceful fallback if memory disabled
@@ -102,6 +109,7 @@ The orchestrator uses **LangGraph ReAct agent** with automatic tool selection:
 - All tool descriptions in Russian for optimal routing accuracy
 
 **Current Tools:**
+- `mcp_tools` - MCP agent for project/employee operations (priority: 20)
 - `knowledge_search` - RAG agent for knowledge base queries (priority: 10)
 
 **Adding New Agents:**
@@ -120,6 +128,39 @@ The orchestrator uses **LangGraph ReAct agent** with automatic tool selection:
 - Must inherit from `BaseAgent`
 - Implement `answer_question(query: str)` or `process_message(user_message: str)` method
 - Return string response
+
+### MCP Implementation
+
+**MCP Agent** ([agents/mcp_agent.py](agents/mcp_agent.py)):
+- HTTP client with 30-second timeout for JSON-RPC 2.0 calls
+- MCP server URL: `https://eneca-mcp-server-2c6301361601.herokuapp.com/mcp`
+- Dynamic tool loading via `tools/list` JSON-RPC method
+- 21 available tools: projects, stages, objects, sections, employees management
+
+**MCP Flow**:
+```
+User Query → OrchestratorAgent.process_message()
+           → LangGraph ReAct agent selects mcp_tools
+           → MCPAgent.process_message()
+           → LLM parses query → extracts tool name + arguments
+           → HTTP POST to MCP server (JSON-RPC 2.0)
+           → MCP server returns result
+           → MCPAgent formats response in Russian
+           → Returns answer to orchestrator
+```
+
+**Available MCP Tools:**
+- **Projects**: create_project, search_projects, get_project_details, update_project, get_project_team
+- **Stages**: create_stage, search_stages, update_stage
+- **Objects**: create_object, search_objects, update_object
+- **Sections**: create_section, search_sections, update_section
+- **Employees**: search_employee_full_info, search_by_responsible, search_users, get_employee_workload
+- **Reports**: generate_project_report_plan_fact
+
+**Error Handling:**
+- Timeout after 30 seconds with user-friendly message
+- JSON-RPC errors extracted and displayed in Russian
+- Graceful fallback if MCP server unavailable
 
 ### RAG Implementation
 
@@ -341,6 +382,7 @@ Eneca_AI_bot/
 **Core Architecture:**
 - [agents/base.py](agents/base.py) - Abstract agent base class
 - [agents/orchestrator.py](agents/orchestrator.py):79 - Main routing logic with LangGraph
+- [agents/mcp_agent.py](agents/mcp_agent.py) - MCP server integration via JSON-RPC 2.0
 - [agents/rag_agent.py](agents/rag_agent.py):45 - Vector search and RAG pipeline
 - [core/agent_registry.py](core/agent_registry.py):214 - Dynamic agent/tool creation
 - [core/memory.py](core/memory.py) - Conversation checkpointing
@@ -357,6 +399,7 @@ Eneca_AI_bot/
 
 **Prompts (Russian):**
 - [prompts/orchestrator.md](prompts/orchestrator.md) - Routing and tool selection logic
+- [prompts/mcp_agent.md](prompts/mcp_agent.md) - MCP tool selection and formatting
 - [prompts/rag_agent.md](prompts/rag_agent.md) - RAG answer formatting rules
 
 **Documentation:**

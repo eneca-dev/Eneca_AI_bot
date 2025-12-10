@@ -4,11 +4,13 @@ AI-powered bot built with LangChain, Supabase, and Python.
 
 ## Features
 
-- Multi-platform support (Telegram, Discord)
-- LangChain-based AI agents
-- Supabase database integration
-- Configurable LLM providers (OpenAI, Anthropic, Groq)
-- Structured logging with Loguru
+- **Dynamic Agent System**: Plugin-based architecture with automatic agent registration
+- **MCP Integration**: External MCP server for project management (21 tools via JSON-RPC 2.0)
+- **RAG (Retrieval-Augmented Generation)**: Knowledge base search with Supabase pgvector
+- **Conversation Memory**: Thread-based memory with SQLite/PostgreSQL checkpointers
+- **Multi-platform support**: Telegram, Discord (planned)
+- **Configurable LLM providers**: OpenAI, Anthropic, Groq
+- **Structured logging**: Loguru with rotation and retention
 
 ## Project Structure
 
