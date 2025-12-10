@@ -124,6 +124,40 @@ class SupabaseDBClient:
             logger.error(f"Failed to get conversation history: {e}")
             return []
 
+    def get_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get user profile from profiles table
+
+        Args:
+            user_id: User ID to fetch profile for
+
+        Returns:
+            Dict with profile data or None if not found
+        """
+        if not self.is_available():
+            logger.warning("Supabase DB Client not available - cannot fetch profile")
+            return None
+
+        try:
+            response = (
+                self.client.table('profiles')
+                .select('email, first_name, last_name')
+                .eq('user_id', user_id)
+                .single()
+                .execute()
+            )
+
+            if response.data:
+                logger.info(f"Loaded profile for user_id={user_id}")
+                return response.data
+            else:
+                logger.warning(f"No profile found for user_id={user_id}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error fetching profile for user_id={user_id}: {e}")
+            return None  # Graceful degradation
+
 
 # Global singleton instance
 supabase_db_client = SupabaseDBClient()
