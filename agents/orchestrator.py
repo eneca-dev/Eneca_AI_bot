@@ -76,7 +76,13 @@ class OrchestratorAgent(BaseAgent):
         logger.info(f"ReAct agent created with LangGraph and checkpointer={'enabled' if checkpointer else 'disabled'}")
         return agent
 
-    def process_message(self, user_message: str, thread_id: str = "default", config: Optional[Dict[str, Any]] = None) -> str:
+    def process_message(
+        self,
+        user_message: str,
+        thread_id: str = "default",
+        config: Optional[Dict[str, Any]] = None,
+        user_context: Optional[Dict[str, Any]] = None
+    ) -> str:
         """
         Process user message with routing to appropriate tools
 
@@ -84,6 +90,7 @@ class OrchestratorAgent(BaseAgent):
             user_message: User's input message
             thread_id: Thread ID for conversation memory (default: "default")
             config: Optional configuration dict for agent invocation
+            user_context: Optional user profile context (email, first_name, last_name, job_title, department)
 
         Returns:
             Agent's response
@@ -99,9 +106,27 @@ class OrchestratorAgent(BaseAgent):
             if self.checkpointer:
                 config["configurable"] = {"thread_id": thread_id}
 
-            # Run agent with LangGraph ReAct pattern
-            # Use HumanMessage for proper serialization
-            response = self.agent.invoke(
+            # Build effective system prompt with user context
+            effective_system_prompt = self.system_prompt
+
+            if user_context:
+                # Add user context to system prompt
+                context_text = self._format_user_context(user_context)
+                if context_text:  # Only add if context is not empty
+                    effective_system_prompt = f"{self.system_prompt}\n\n{context_text}"
+                    logger.info(f"Added user context to system prompt for thread '{thread_id}'")
+
+            # Create temporary agent with updated system prompt
+            # LangGraph agents are lightweight, OK to recreate for each message
+            temp_agent = create_react_agent(
+                model=self.llm,
+                tools=self.tools,
+                state_modifier=effective_system_prompt,  # Updated prompt with context
+                checkpointer=self.checkpointer
+            )
+
+            # Run agent with user message
+            response = temp_agent.invoke(
                 {"messages": [HumanMessage(content=user_message)]},
                 config=config
             )
@@ -149,3 +174,39 @@ class OrchestratorAgent(BaseAgent):
                 "Произошла ошибка при обработке вашего запроса. "
                 "Пожалуйста, попробуйте переформулировать вопрос."
             )
+
+    def _format_user_context(self, user_context: Dict[str, Any]) -> str:
+        """
+        Format user context for system prompt injection
+
+        Args:
+            user_context: Dict with user profile data (email, first_name, last_name, job_title, department)
+
+        Returns:
+            Formatted context string for system prompt
+        """
+        parts = ["=== КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ ==="]
+
+        # Add name if available
+        if user_context.get('first_name') or user_context.get('last_name'):
+            name = f"{user_context.get('first_name', '')} {user_context.get('last_name', '')}".strip()
+            parts.append(f"Имя пользователя: {name}")
+
+        # Add job title
+        if user_context.get('job_title'):
+            parts.append(f"Должность: {user_context['job_title']}")
+
+        # Add department
+        if user_context.get('department'):
+            parts.append(f"Отдел: {user_context['department']}")
+
+        # Add email
+        if user_context.get('email'):
+            parts.append(f"Email: {user_context['email']}")
+
+        # If only header (no actual data), return empty string
+        if len(parts) == 1:
+            return ""
+
+        parts.append("=== КОНЕЦ КОНТЕКСТА ===")
+        return "\n".join(parts)

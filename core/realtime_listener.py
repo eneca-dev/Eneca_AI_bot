@@ -114,6 +114,13 @@ class RealtimeListener:
 
             logger.info(f"📨 Processing message from conversation: {conversation_id}")
 
+            # Fetch user profile (NEW)
+            user_context = None
+            if user_id and supabase_db_client.is_available():
+                user_context = supabase_db_client.get_user_profile(user_id)
+                if user_context:
+                    logger.info(f"👤 Loaded profile: {user_context.get('first_name', '')} {user_context.get('last_name', '')}")
+
             # Load conversation history from Supabase
             messages = []
             if supabase_db_client.is_available():
@@ -137,10 +144,32 @@ class RealtimeListener:
 
             logger.info(f"📤 Sending {len(messages)} total messages to agent")
 
-            # Process with orchestrator agent (with full history)
-            response = self.agent.agent.invoke(
+            # Process with orchestrator agent (with full history and user context)
+            # Note: This uses agent.agent.invoke() directly to support full message history
+            # User context is injected via system prompt by creating temp agent
+            config = {"configurable": {"thread_id": conversation_id}}
+
+            # Build effective system prompt with user context
+            effective_system_prompt = self.agent.system_prompt
+            if user_context:
+                context_text = self.agent._format_user_context(user_context)
+                if context_text:
+                    effective_system_prompt = f"{self.agent.system_prompt}\n\n{context_text}"
+                    logger.info(f"Added user context to system prompt for conversation {conversation_id}")
+
+            # Create temporary agent with updated system prompt
+            from langgraph.prebuilt import create_react_agent
+            temp_agent = create_react_agent(
+                model=self.agent.llm,
+                tools=self.agent.tools,
+                state_modifier=effective_system_prompt,
+                checkpointer=self.agent.checkpointer
+            )
+
+            # Invoke with full message history
+            response = temp_agent.invoke(
                 {"messages": messages},
-                config={"configurable": {"thread_id": conversation_id}}
+                config=config
             )
 
             # Extract bot response from agent output
