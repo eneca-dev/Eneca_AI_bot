@@ -5,16 +5,19 @@ services:
   ai_agent:
     build: .
     container_name: ai_agent_bot
-    restart: always
+    restart: always             # <-- Вот он, автозапуск
     env_file:
       - .env
-    # Мы убрали ports "8000:8000", теперь бот доступен ТОЛЬКО внутри Docker сети.
-    # Снаружи к нему не подключиться — это безопасно.
     ports:
       - "8000:8000"
     volumes:
-      - .:/app 
-      
+      - .:/app       
+    logging:                    # <-- Настройки логов
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # 4. Portainer (Визуальный мониторинг)
   portainer:
     image: portainer/portainer-ce:latest
