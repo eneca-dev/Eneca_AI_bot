@@ -10,37 +10,11 @@ services:
       - .env
     # Мы убрали ports "8000:8000", теперь бот доступен ТОЛЬКО внутри Docker сети.
     # Снаружи к нему не подключиться — это безопасно.
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     volumes:
       - .:/app 
-
-  # Nginx - Входные ворота (Reverse Proxy)
-  nginx:
-    image: nginx:stable-alpine
-    container_name: gateway_nginx
-    restart: always
-    ports:
-      - "80:80"   # Обычный веб-трафик
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./certbot/conf:/etc/letsencrypt # Папка для ключей SSL
-      - ./certbot/www:/var/www/certbot  # Папка для проверки домена
-    depends_on:
-      - ai_agent
-
-  # 3. Certbot (Выпуск сертификатов)
-  certbot:
-    image: certbot/certbot
-    container_name: certbot_utility
-    volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-    # Важная строка для вечного обновления:
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-
-
+      
   # 4. Portainer (Визуальный мониторинг)
   portainer:
     image: portainer/portainer-ce:latest

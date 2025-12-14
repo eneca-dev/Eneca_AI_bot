@@ -192,6 +192,7 @@ def process_webhook_message(record: SupabaseWebhookRecord):
             pass  # Silently fail if error message can't be written
 
 # --- Webhook Endpoint ---
+@app.post("/webhook")  
 @app.post("/webhook/supabase", response_model=WebhookResponse)
 async def supabase_webhook(
     payload: SupabaseWebhookPayload,
