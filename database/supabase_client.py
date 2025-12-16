@@ -126,37 +126,80 @@ class SupabaseDBClient:
 
     def get_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get user profile from profiles table
+        Get user profile with role information from profiles table
+
+        Fetches user profile and role via JOIN with user_roles and roles tables.
+        If user has no role assigned, defaults to 'guest' role.
 
         Args:
             user_id: User ID to fetch profile for
 
         Returns:
-            Dict with profile data or None if not found
+            Dict with profile data including role_name:
+            {
+                'email': str,
+                'first_name': str,
+                'last_name': str,
+                'role_name': str  # Role name from roles table, 'guest' if not assigned
+            }
+            Returns None if profile not found or on database error (fail-secure with guest role)
         """
         if not self.is_available():
             logger.warning("Supabase DB Client not available - cannot fetch profile")
             return None
 
         try:
+            # JOIN profiles with user_roles and roles tables
+            # SELECT profiles.*, roles.name as role_name
+            # FROM profiles
+            # LEFT JOIN user_roles ON profiles.user_id = user_roles.user_id
+            # LEFT JOIN roles ON user_roles.role_id = roles.id
             response = (
                 self.client.table('profiles')
-                .select('email, first_name, last_name')
+                .select('email, first_name, last_name, user_roles(role_id, roles(name))')
                 .eq('user_id', user_id)
                 .single()
                 .execute()
             )
 
             if response.data:
-                logger.info(f"Loaded profile for user_id={user_id}")
-                return response.data
+                profile = response.data
+
+                # Extract role_name from nested structure
+                role_name = 'guest'  # Default role (fail-secure)
+                if profile.get('user_roles'):
+                    # user_roles is a list of relationships
+                    if len(profile['user_roles']) > 0:
+                        user_role = profile['user_roles'][0]
+                        # roles is nested inside user_role
+                        if user_role.get('roles') and user_role['roles'].get('name'):
+                            role_name = user_role['roles']['name']
+                            logger.debug(f"Role loaded from database: {role_name}")
+
+                # Flatten structure for easier consumption
+                result = {
+                    'email': profile.get('email'),
+                    'first_name': profile.get('first_name'),
+                    'last_name': profile.get('last_name'),
+                    'role_name': role_name
+                }
+
+                logger.info(f"Loaded profile for user_id={user_id}, role={role_name}")
+                return result
             else:
                 logger.warning(f"No profile found for user_id={user_id}")
                 return None
 
         except Exception as e:
             logger.error(f"Error fetching profile for user_id={user_id}: {e}")
-            return None  # Graceful degradation
+            # Graceful degradation: return guest role on database error (fail-secure)
+            logger.warning(f"Returning guest role due to database error")
+            return {
+                'email': None,
+                'first_name': None,
+                'last_name': None,
+                'role_name': 'guest'
+            }
 
 
 # Global singleton instance

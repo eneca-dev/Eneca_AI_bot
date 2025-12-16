@@ -151,6 +151,8 @@ async def chat_endpoint(
     }
     """
     try:
+        from database.supabase_client import supabase_db_client
+
         logger.info(f"Received chat request: {request.model_dump()}")
 
         # Get agent instance
@@ -159,11 +161,32 @@ async def chat_endpoint(
         # Generate or use provided thread_id
         thread_id = request.thread_id or request.chat_id or str(uuid.uuid4())
 
-        # Process message with agent
-        logger.info(f"Processing message for thread: {thread_id}")
+        # Load user profile with role (RBAC integration)
+        user_context = None
+        if request.user_id:
+            if supabase_db_client.is_available():
+                user_context = supabase_db_client.get_user_profile(request.user_id)
+                if user_context:
+                    logger.info(f"Loaded user profile: {request.user_id}, role: {user_context.get('role_name')}")
+                else:
+                    # Profile not found, use guest role
+                    logger.warning(f"No profile found for user_id={request.user_id}, using guest role")
+                    user_context = {'role_name': 'guest'}
+            else:
+                # Supabase not available, use guest role
+                logger.warning("Supabase not available, using guest role")
+                user_context = {'role_name': 'guest'}
+        else:
+            # No user_id provided, use guest role
+            logger.info("No user_id provided, using guest role")
+            user_context = {'role_name': 'guest'}
+
+        # Process message with agent (with user context for RBAC)
+        logger.info(f"Processing message for thread: {thread_id}, role: {user_context.get('role_name')}")
         response = agent_instance.process_message(
             user_message=request.message,
-            thread_id=thread_id
+            thread_id=thread_id,
+            user_context=user_context
         )
 
         logger.info(f"Agent response generated successfully for thread: {thread_id}")

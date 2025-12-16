@@ -90,12 +90,25 @@ class OrchestratorAgent(BaseAgent):
             user_message: User's input message
             thread_id: Thread ID for conversation memory (default: "default")
             config: Optional configuration dict for agent invocation
-            user_context: Optional user profile context (email, first_name, last_name, job_title, department)
+            user_context: Optional user profile context:
+                - email: str
+                - first_name: str
+                - last_name: str
+                - job_title: str (optional)
+                - department: str (optional)
+                - role_name: str (for RBAC)
 
         Returns:
             Agent's response
         """
+        from core.agent_registry import set_current_user_role
+
         logger.info(f"Processing message in thread '{thread_id}': {user_message[:50]}...")
+
+        # Set current user role in thread-local storage for agents (RBAC)
+        user_role = user_context.get('role_name') if user_context else None
+        set_current_user_role(user_role)
+        logger.info(f"User role for this request: {user_role or 'guest'}")
 
         try:
             # Prepare config with thread_id for memory persistence
@@ -174,17 +187,31 @@ class OrchestratorAgent(BaseAgent):
                 "Произошла ошибка при обработке вашего запроса. "
                 "Пожалуйста, попробуйте переформулировать вопрос."
             )
+        finally:
+            # Clear user role from thread-local storage after processing (RBAC cleanup)
+            set_current_user_role(None)
+            logger.debug("Cleared thread-local user role")
 
     def _format_user_context(self, user_context: Dict[str, Any]) -> str:
         """
         Format user context for system prompt injection
 
+        Includes user profile data and role-based soft restrictions for LLM.
+
         Args:
-            user_context: Dict with user profile data (email, first_name, last_name, job_title, department)
+            user_context: Dict with user profile data:
+                - email: str
+                - first_name: str
+                - last_name: str
+                - job_title: str (optional)
+                - department: str (optional)
+                - role_name: str (for RBAC)
 
         Returns:
-            Formatted context string for system prompt
+            Formatted context string for system prompt in Russian
         """
+        from core.rbac import rbac_manager
+
         parts = ["=== КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ ==="]
 
         # Add name if available
@@ -204,9 +231,22 @@ class OrchestratorAgent(BaseAgent):
         if user_context.get('email'):
             parts.append(f"Email: {user_context['email']}")
 
+        # Add role (NEW - RBAC integration)
+        role_name = user_context.get('role_name', 'guest')
+        parts.append(f"Роль: {role_name}")
+
         # If only header (no actual data), return empty string
         if len(parts) == 1:
             return ""
 
         parts.append("=== КОНЕЦ КОНТЕКСТА ===")
+
+        # Add soft restrictions for LLM (NEW - RBAC soft control)
+        soft_restrictions = rbac_manager.get_soft_restrictions(role_name)
+        if soft_restrictions:
+            parts.append("")  # Empty line for spacing
+            parts.append("=== ОГРАНИЧЕНИЯ ДОСТУПА ===")
+            parts.append(soft_restrictions)
+            parts.append("=== КОНЕЦ ОГРАНИЧЕНИЙ ===")
+
         return "\n".join(parts)

@@ -100,6 +100,13 @@ The system implements a **plugin-based agent architecture** with dynamic registr
    - Thread-based conversation tracking
    - Graceful fallback if memory disabled
 
+7. **RBACManager** ([core/rbac.py](core/rbac.py)) - Role-Based Access Control:
+   - Loads permissions from [config/permissions.yaml](config/permissions.yaml)
+   - Hard permission checks for dangerous operations (create, update, delete)
+   - Soft restrictions via LLM system prompt for safe operations (read, search)
+   - 5 roles: admin (full access), manager, engineer, viewer, guest (minimal)
+   - Thread-local role storage for concurrent request isolation
+
 ### Routing Mechanism
 
 The orchestrator uses **LangGraph ReAct agent** with automatic tool selection:
@@ -226,10 +233,80 @@ MEMORY_SUPABASE_TABLE=n8n_chat_histories
 
 **Setup:** See [docs/SUPABASE_MEMORY_SETUP.md](docs/SUPABASE_MEMORY_SETUP.md) for complete guide
 
+### Role-Based Access Control (RBAC)
+
+**RBAC Architecture** ([core/rbac.py](core/rbac.py)):
+- Hybrid approach: Hard checks for dangerous operations + Soft LLM-based control for safe operations
+- Configuration-driven via [config/permissions.yaml](config/permissions.yaml)
+- Role hierarchy: admin (100) → manager (50) → engineer (30) → viewer (10) → guest (0)
+- Thread-local role storage for concurrent request isolation
+
+**Permission Flow:**
+```
+User Request → Webhook loads user_id
+            → Database query: profiles JOIN user_roles JOIN roles
+            → Extract role_name (default: 'guest' on error)
+            → Orchestrator sets thread-local role
+            → Agent invoked with user_role parameter
+            → MCPAgent checks permission BEFORE tool call
+            → If denied: "У вас нет прав для этой операции. Ваша роль: '{role}'"
+            → If allowed: Execute MCP tool
+            → Clear thread-local role after processing
+```
+
+**Role Permissions:**
+- **admin**: Wildcard `*` - full access to all operations
+- **manager**: Can create/update projects, stages, objects, sections
+- **engineer**: Can create/update objects and sections only
+- **viewer**: Read-only access (all dangerous operations blocked)
+- **guest**: Minimal access, basic search only (default role)
+
+**Permission Categories:**
+- **Dangerous tools** (hard checks): create_project, update_project, create_stage, update_stage, create_object, update_object, create_section, update_section
+- **Safe tools** (soft LLM control): search_projects, get_project_details, search_employees, generate_reports, etc.
+
+**Key Components:**
+- [core/rbac.py](core/rbac.py):62 - `RBACManager.check_permission()` - Hard permission check
+- [core/rbac.py](core/rbac.py):116 - `RBACManager.get_soft_restrictions()` - LLM prompt injection
+- [core/agent_registry.py](core/agent_registry.py):14-39 - Thread-local role storage
+- [agents/mcp_agent.py](agents/mcp_agent.py):376-385 - Permission enforcement point
+- [database/supabase_client.py](database/supabase_client.py):157-163 - Role loading with JOIN
+
+**Configuration Example** ([config/permissions.yaml](config/permissions.yaml)):
+```yaml
+permissions:
+  admin:
+    allowed_dangerous_tools: "*"  # All operations
+
+  manager:
+    allowed_dangerous_tools:
+      - create_project
+      - update_project
+      - create_stage
+      - update_stage
+    soft_restrictions:
+      prompt: "Пользователь имеет роль 'manager'. Может создавать/редактировать проекты."
+
+  guest:
+    allowed_dangerous_tools: []  # No dangerous operations
+    soft_restrictions:
+      prompt: "Пользователь имеет роль 'guest'. Только базовый поиск, ограничить детали."
+```
+
+**Security Principles:**
+- **Fail-secure**: Unknown roles default to `guest` (minimum privileges)
+- **Defense in depth**: Hard checks + soft LLM restrictions
+- **Audit logging**: All permission denials logged with context
+- **Role from database**: Never trust user-provided role information
+- **Thread isolation**: Thread-local storage prevents role leakage between requests
+
+**Testing:** [tests/test_rbac.py](tests/test_rbac.py) - 13 unit tests covering all permission scenarios
+
 ### Database Schema
 
 Expected Supabase schema (see [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) for full SQL):
 ```sql
+-- Vector store for RAG
 CREATE TABLE documents (
   id bigserial primary key,
   content text,
@@ -242,6 +319,33 @@ CREATE FUNCTION match_documents(
   match_threshold float,
   match_count int
 ) RETURNS TABLE (id bigint, content text, metadata jsonb, similarity float);
+
+-- RBAC tables
+CREATE TABLE roles (
+  id uuid primary key default gen_random_uuid(),
+  name text unique not null,
+  description text,
+  created_at timestamptz default now()
+);
+
+CREATE TABLE user_roles (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  role_id uuid not null references roles(id),
+  created_at timestamptz default now(),
+  unique(user_id, role_id)
+);
+
+-- User profiles
+CREATE TABLE profiles (
+  user_id uuid primary key,
+  email text,
+  first_name text,
+  last_name text,
+  job_title text,
+  department text,
+  created_at timestamptz default now()
+);
 ```
 
 **Graceful Degradation**: System checks `vector_store_manager.is_available()` before operations. If Supabase unavailable, orchestrator handles all queries directly without RAG.
@@ -362,9 +466,11 @@ Eneca_AI_bot/
 │   ├── config.py     # Pydantic settings from .env
 │   ├── vector_store.py  # Supabase pgvector integration
 │   ├── memory.py     # LangGraph checkpointer management
-│   └── agent_registry.py  # Dynamic agent loading from YAML
+│   ├── agent_registry.py  # Dynamic agent loading from YAML
+│   └── rbac.py       # Role-Based Access Control manager
 ├── config/           # Configuration files
-│   └── agents.yaml   # Agent definitions and tool descriptions
+│   ├── agents.yaml   # Agent definitions and tool descriptions
+│   └── permissions.yaml  # RBAC role permissions configuration
 ├── prompts/          # Markdown system prompts (external from code)
 │   ├── orchestrator.md  # Orchestrator routing instructions
 │   └── rag_agent.md     # RAG answer formatting rules
@@ -384,15 +490,18 @@ Eneca_AI_bot/
 **Core Architecture:**
 - [agents/base.py](agents/base.py) - Abstract agent base class
 - [agents/orchestrator.py](agents/orchestrator.py):79 - Main routing logic with LangGraph
-- [agents/mcp_agent.py](agents/mcp_agent.py) - MCP server integration via JSON-RPC 2.0
+- [agents/mcp_agent.py](agents/mcp_agent.py):342 - MCP server integration with RBAC enforcement
 - [agents/rag_agent.py](agents/rag_agent.py):45 - Vector search and RAG pipeline
-- [core/agent_registry.py](core/agent_registry.py):214 - Dynamic agent/tool creation
+- [core/agent_registry.py](core/agent_registry.py):14 - Dynamic agent/tool creation + thread-local role storage
 - [core/memory.py](core/memory.py) - Conversation checkpointing
 - [core/vector_store.py](core/vector_store.py) - Supabase pgvector integration
 - [core/config.py](core/config.py) - Pydantic settings management
+- [core/rbac.py](core/rbac.py) - Role-Based Access Control manager
+- [database/supabase_client.py](database/supabase_client.py):127 - User profile loading with roles
 
 **Configuration:**
 - [config/agents.yaml](config/agents.yaml) - Agent registry configuration
+- [config/permissions.yaml](config/permissions.yaml) - RBAC role permissions
 - [.env](.env) - Environment variables (API keys, database URLs)
 
 **Entry Points:**
@@ -407,6 +516,9 @@ Eneca_AI_bot/
 **Documentation:**
 - [docs/SUPABASE_SETUP_NOTES.md](docs/SUPABASE_SETUP_NOTES.md) - Encoding issues and workarounds
 - [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) - Planned features
+
+**Tests:**
+- [tests/test_rbac.py](tests/test_rbac.py) - RBAC permission system unit tests (13 tests)
 
 ## Language Conventions
 
