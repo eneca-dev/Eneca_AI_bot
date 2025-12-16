@@ -11,9 +11,6 @@ from loguru import logger
 class MCPAgent(BaseAgent):
     """Agent for interacting with MCP server via JSON-RPC 2.0"""
 
-    # Default MCP server URL
-    DEFAULT_MCP_URL = "https://eneca-mcp-server-2c6301361601.herokuapp.com/mcp"
-
     # Request timeout in seconds
     REQUEST_TIMEOUT = 30.0
 
@@ -36,7 +33,7 @@ class MCPAgent(BaseAgent):
 
         super().__init__(model=model, temperature=temperature)
 
-        self.mcp_url = mcp_url or self.DEFAULT_MCP_URL
+        self.mcp_url = mcp_url or settings.mcp_server_url
         self._request_id = 0
         self._tools_cache: Optional[List[Dict]] = None
 

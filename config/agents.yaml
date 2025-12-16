@@ -52,7 +52,7 @@ agents:
     config:
       model: gpt-4o
       temperature: 0.3
-      mcp_url: "https://eneca-mcp-server-2c6301361601.herokuapp.com/mcp"
+      # mcp_url now loaded from settings.mcp_server_url (.env)
 
   # Web Search Agent - поиск в интернете (пример)
   # - name: web_search

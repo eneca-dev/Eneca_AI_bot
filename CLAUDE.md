@@ -133,9 +133,11 @@ The orchestrator uses **LangGraph ReAct agent** with automatic tool selection:
 
 **MCP Agent** ([agents/mcp_agent.py](agents/mcp_agent.py)):
 - HTTP client with 30-second timeout for JSON-RPC 2.0 calls
-- MCP server URL: `https://eneca-mcp-server-2c6301361601.herokuapp.com/mcp`
+- MCP server URL: Configured via `MCP_SERVER_URL` in `.env` (not committed to git for security)
 - Dynamic tool loading via `tools/list` JSON-RPC method
 - 21 available tools: projects, stages, objects, sections, employees management
+
+⚠️ **Security:** MCP server URL is stored in `.env` (gitignored) to prevent unauthorized access.
 
 **MCP Flow**:
 ```
