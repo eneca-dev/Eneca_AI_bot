@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     supabase_chat_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_KEY")  # ANON_KEY for Realtime subscriptions
     supabase_chat_service_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_SERVICE_KEY")  # Bypasses RLS for bot writes
 
+    # MCP Server Configuration
+    mcp_server_url: str = Field(..., alias="MCP_SERVER_URL")
+
     # Bot Configuration
     bot_token: Optional[str] = Field(None, alias="BOT_TOKEN")
 
