@@ -129,13 +129,15 @@ class VectorStoreManager:
         score_threshold = score_threshold or settings.similarity_threshold
 
         try:
-            logger.debug(f"Searching vector store with scores for query: {query}")
+            logger.info(f"🔍 VECTOR SEARCH: query='{query[:50]}...', k={k}, threshold={score_threshold}")
             results = self.vector_store.similarity_search_with_relevance_scores(
                 query, k=k, score_threshold=score_threshold
             )
+            logger.info(f"🔍 VECTOR SEARCH: got {len(results)} raw results")
 
             documents = []
-            for doc, score in results:
+            for idx, (doc, score) in enumerate(results):
+                logger.debug(f"🔍 Doc {idx+1}: score={score:.4f}, content='{doc.page_content[:80]}...'")
                 # Updated relevance bands for higher quality threshold
                 relevance = "high" if score >= 0.8 else "medium" if score >= 0.6 else "low"
 

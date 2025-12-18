@@ -1,8 +1,9 @@
-"""RAG Agent for knowledge base search"""
+"""RAG Agent for knowledge base search with Cohere Reranking"""
 from pathlib import Path
 from typing import List, Dict
 from agents.base import BaseAgent
 from core.vector_store import vector_store_manager
+from core.reranker import reranker
 from core.config import settings
 from loguru import logger
 
@@ -44,11 +45,16 @@ class RAGAgent(BaseAgent):
 
     def search_knowledge_base(self, query: str, k: int = None) -> str:
         """
-        Search knowledge base and return formatted results
+        Search knowledge base with optional Cohere reranking
+
+        Pipeline:
+        1. Vector search (get more candidates with lower threshold)
+        2. Cohere rerank (if enabled) to select top-n most relevant
+        3. Format results for LLM context
 
         Args:
             query: User's search query
-            k: Number of results to return (defaults to config value)
+            k: Number of final results to return (defaults to RERANK_TOP_N or VECTOR_SEARCH_K)
 
         Returns:
             Formatted string with search results
@@ -61,20 +67,46 @@ class RAGAgent(BaseAgent):
             )
 
         try:
-            # Search with relevance scores (uses config defaults if k not provided)
-            documents = self.vector_store.search_with_score(query=query, k=k)
+            # Determine search parameters based on reranker availability
+            if reranker.is_available():
+                # Get more candidates for reranking (10 candidates -> top 3 after rerank)
+                search_k = 10
+                final_k = k or settings.rerank_top_n
+                logger.info(f"Reranker enabled: fetching {search_k} candidates, will return top {final_k}")
+            else:
+                # No reranker - use standard search
+                search_k = k or settings.vector_search_k
+                final_k = search_k
+                logger.info(f"Reranker disabled: fetching {search_k} documents directly")
+
+            # Step 1: Vector search (get candidates)
+            documents = self.vector_store.search_with_score(query=query, k=search_k)
 
             if not documents:
                 return "Информация по вашему запросу не найдена в базе знаний."
 
-            # Format results
+            # Step 2: Rerank if available
+            if reranker.is_available() and len(documents) > 0:
+                documents = reranker.rerank(
+                    query=query,
+                    documents=documents,
+                    top_n=final_k
+                )
+                logger.info(f"Reranked {search_k} -> {len(documents)} documents")
+            else:
+                # Limit to final_k without reranking
+                documents = documents[:final_k]
+
+            # Step 3: Format results
             result = "Найденная информация:\n\n"
             for i, doc in enumerate(documents, 1):
                 content = doc["content"]
                 score = doc.get("score", 0)
                 relevance = doc.get("relevance", "unknown")
+                is_reranked = doc.get("reranked", False)
 
-                result += f"[Документ {i}] (релевантность: {relevance}, score: {score:.2f})\n"
+                score_label = f"rerank: {score:.3f}" if is_reranked else f"vector: {score:.2f}"
+                result += f"[Документ {i}] (релевантность: {relevance}, {score_label})\n"
                 result += f"{content}\n\n"
 
             return result.strip()
@@ -96,13 +128,15 @@ class RAGAgent(BaseAgent):
         Returns:
             Answer based on knowledge base
         """
-        logger.info(f"RAG Agent processing question: {question[:50]}...")
+        logger.info(f"📚 RAG AGENT: processing question: '{question}'")
 
         # Search knowledge base
         context = self.search_knowledge_base(question)
+        logger.info(f"📚 RAG AGENT: got context ({len(context)} chars)")
 
         # If no relevant documents found, return early
         if "не найдена" in context or "недоступна" in context or "ошибка" in context.lower():
+            logger.warning(f"📚 RAG AGENT: no relevant docs found, returning early")
             return context
 
         # Construct prompt with context

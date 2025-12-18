@@ -1,0 +1,135 @@
+# RBAC Permission Configuration for Eneca AI Bot
+# Defines role hierarchy, tool categories, and per-role permissions
+
+# Role hierarchy (higher number = more privileges)
+role_hierarchy:
+  admin: 100
+  manager: 50
+  engineer: 30
+  viewer: 10
+  guest: 0
+
+# Tool categories: dangerous (modify data) vs safe (read-only)
+tool_categories:
+  dangerous:
+    description: "Operations that modify data - require hard permission checks"
+    tools:
+      # Project operations
+      - create_project
+      - update_project
+
+      # Stage operations
+      - create_stage
+      - update_stage
+
+      # Object operations
+      - create_object
+      - update_object
+
+      # Section operations
+      - create_section
+      - update_section
+
+  safe:
+    description: "Read-only operations - soft control via LLM system prompt"
+    tools:
+      # Project queries
+      - search_projects
+      - get_project_details
+      - get_project_team
+
+      # Stage queries
+      - search_stages
+
+      # Object queries
+      - search_objects
+
+      # Section queries
+      - search_sections
+
+      # Employee queries
+      - search_employee_full_info
+      - search_by_responsible
+      - search_users
+      - get_employee_workload
+
+      # Reports
+      - generate_project_report_plan_fact
+
+# Per-role permissions
+permissions:
+  admin:
+    description: "Полный доступ ко всем операциям (администратор)"
+    allowed_dangerous_tools: "*"  # Wildcard - все опасные операции разрешены
+    soft_restrictions: null  # Нет ограничений для admin
+
+  manager:
+    description: "Может создавать и редактировать проекты, этапы, объекты, разделы (менеджер проектов)"
+    allowed_dangerous_tools:
+      - create_project
+      - update_project
+      - create_stage
+      - update_stage
+      - create_object
+      - update_object
+      - create_section
+      - update_section
+    soft_restrictions:
+      prompt: |
+        Пользователь имеет роль 'manager' (менеджер проектов).
+        Он может:
+        - Просматривать любую информацию о проектах, этапах, объектах, сотрудниках
+        - Создавать и редактировать проекты, этапы, объекты, разделы
+
+        Ограничения:
+        - НЕ может удалять данные (операции удаления недоступны)
+
+  engineer:
+    description: "Может создавать и редактировать объекты и разделы в своих проектах (инженер)"
+    allowed_dangerous_tools:
+      - create_object
+      - update_object
+      - create_section
+      - update_section
+    soft_restrictions:
+      prompt: |
+        Пользователь имеет роль 'engineer' (инженер).
+        Он может:
+        - Просматривать информацию о проектах, этапах, объектах, разделах
+        - Создавать и редактировать объекты и разделы в проектах, где он является участником
+
+        Ограничения:
+        - НЕ может создавать или изменять проекты и этапы
+        - НЕ может удалять данные
+
+  viewer:
+    description: "Только чтение данных, без права на модификацию (наблюдатель)"
+    allowed_dangerous_tools: []  # Никаких опасных операций
+    soft_restrictions:
+      prompt: |
+        Пользователь имеет роль 'viewer' (наблюдатель).
+        Он может ТОЛЬКО:
+        - Просматривать информацию о проектах, этапах, объектах, разделах
+        - Искать сотрудников и получать отчеты
+
+        Ограничения:
+        - НЕ может создавать, изменять или удалять данные
+        - НЕ предлагай операции создания или изменения данных в ответах
+
+  guest:
+    description: "Минимальные права - только базовый поиск (гость, роль по умолчанию)"
+    allowed_dangerous_tools: []  # Никаких опасных операций
+    soft_restrictions:
+      prompt: |
+        Пользователь имеет роль 'guest' (гость).
+        Это минимальные права, предоставленные по умолчанию.
+
+        Он может ТОЛЬКО:
+        - Выполнять базовый поиск информации (проекты, сотрудники)
+        - Получать краткую общую информацию
+
+        Ограничения:
+        - НЕ может создавать, изменять или удалять данные
+        - Ограничь объем возвращаемых данных (не более 5-10 результатов)
+        - НЕ показывай конфиденциальную или детальную информацию
+        - НЕ предлагай операции создания или изменения данных в ответах

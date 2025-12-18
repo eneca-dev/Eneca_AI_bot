@@ -339,17 +339,21 @@ null
 
         return result.strip()
 
-    def process_message(self, user_message: str) -> str:
+    def process_message(self, user_message: str, user_role: Optional[str] = None) -> str:
         """
-        Process user message and execute MCP tool
+        Process user message and execute MCP tool with permission checking
 
         Args:
             user_message: User's natural language request
+            user_role: User's role name for RBAC permission checking (e.g., "admin", "manager", "guest")
 
         Returns:
-            Formatted response
+            Formatted response or permission denied error
         """
+        from core.rbac import rbac_manager
+
         logger.info(f"MCPAgent processing message: {user_message[:100]}...")
+        logger.info(f"User role: {user_role or 'guest'}")
 
         # Parse user request into tool call
         tool_call = self._parse_tool_call(user_message)
@@ -369,20 +373,33 @@ null
 
         logger.info(f"Parsed tool call: {tool_name} with {arguments}")
 
-        # Call MCP tool
+        # RBAC: Check permissions before calling tool (hard permission check)
+        allowed, error_message = rbac_manager.check_permission(
+            role_name=user_role or "guest",
+            tool_name=tool_name
+        )
+
+        if not allowed:
+            # Permission denied - return error message to user
+            logger.warning(f"Permission denied: role='{user_role or 'guest'}', tool='{tool_name}'")
+            return error_message
+
+        # Permission granted - call MCP tool
+        logger.info(f"Permission granted: role='{user_role or 'guest'}', tool='{tool_name}'")
         mcp_response = self._call_mcp_tool(tool_name, arguments)
 
         # Format and return response
         return self._format_response(mcp_response, tool_name)
 
-    def answer_question(self, question: str) -> str:
+    def answer_question(self, question: str, user_role: Optional[str] = None) -> str:
         """
         Alias for process_message (for compatibility with agent registry)
 
         Args:
             question: User's question/request
+            user_role: User's role name for RBAC permission checking
 
         Returns:
-            Formatted response
+            Formatted response or permission denied error
         """
-        return self.process_message(question)
+        return self.process_message(question, user_role=user_role)

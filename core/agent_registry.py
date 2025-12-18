@@ -2,11 +2,41 @@
 from typing import Dict, List, Any, Optional, Type, Callable
 from pathlib import Path
 import importlib
+import inspect
+import threading
 import yaml
 from dataclasses import dataclass
 from agents.base import BaseAgent
 from core.config import settings
 from loguru import logger
+
+
+# Thread-local storage for current user role (RBAC integration)
+_current_user_role = threading.local()
+
+
+def set_current_user_role(role: Optional[str]):
+    """
+    Set current user role in thread-local storage
+
+    Used by orchestrator to pass user role to agents for permission checking.
+    Thread-local ensures isolation between concurrent requests.
+
+    Args:
+        role: User's role name (e.g., "admin", "manager", "guest")
+    """
+    _current_user_role.value = role
+    logger.debug(f"Set thread-local user role: {role}")
+
+
+def get_current_user_role() -> Optional[str]:
+    """
+    Get current user role from thread-local storage
+
+    Returns:
+        User's role name, or None if not set
+    """
+    return getattr(_current_user_role, 'value', None)
 
 
 @dataclass
@@ -231,15 +261,37 @@ class AgentRegistry:
             # Create a closure to capture agent_instance
             def make_tool_func(agent_inst, agent_name):
                 def tool_func(query: str) -> str:
-                    """Tool function that calls the agent"""
+                    """Tool function that calls the agent with optional user_role from thread-local"""
+                    # DEBUG: Log tool invocation
+                    logger.info(f"🔧 TOOL CALLED: '{agent_name}' with query: '{query[:100]}...'")
+
                     try:
-                        # Assume all agents have answer_question or process_message method
+                        # Get current user role from thread-local storage (RBAC integration)
+                        user_role = get_current_user_role()
+
+                        # Try passing user_role if method signature supports it
                         if hasattr(agent_inst, 'answer_question'):
-                            return agent_inst.answer_question(query)
+                            sig = inspect.signature(agent_inst.answer_question)
+                            if 'user_role' in sig.parameters:
+                                logger.debug(f"Calling {agent_name}.answer_question with user_role={user_role}")
+                                result = agent_inst.answer_question(query, user_role=user_role)
+                            else:
+                                result = agent_inst.answer_question(query)
                         elif hasattr(agent_inst, 'process_message'):
-                            return agent_inst.process_message(query)
+                            sig = inspect.signature(agent_inst.process_message)
+                            if 'user_role' in sig.parameters:
+                                logger.debug(f"Calling {agent_name}.process_message with user_role={user_role}")
+                                result = agent_inst.process_message(query, user_role=user_role)
+                            else:
+                                result = agent_inst.process_message(query)
                         else:
                             return f"Агент '{agent_name}' не поддерживает обработку запросов"
+
+                        # DEBUG: Log tool result
+                        logger.info(f"🔧 TOOL RESULT from '{agent_name}': {len(result)} chars")
+                        logger.debug(f"🔧 TOOL RESULT preview: '{result[:200]}...'")
+
+                        return result
                     except Exception as e:
                         logger.error(f"Error in tool for agent '{agent_name}': {e}")
                         return f"Ошибка при вызове агента '{agent_name}': {str(e)}"
