@@ -6,7 +6,7 @@ langchain==0.3.13
 langchain-openai==0.2.14
 langchain-community==0.3.13
 langsmith==0.2.4
-langgraph==0.2.59
+langgraph>=0.3.0
 
 # Database
 supabase==2.11.0
