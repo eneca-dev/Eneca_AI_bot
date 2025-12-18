@@ -154,9 +154,12 @@ class SupabaseDBClient:
             # FROM profiles
             # LEFT JOIN user_roles ON profiles.user_id = user_roles.user_id
             # LEFT JOIN roles ON user_roles.role_id = roles.id
+            # Note: Using explicit FK name because user_roles has 2 FKs to profiles:
+            #   - user_roles_user_id_fkey (user who has the role)
+            #   - user_roles_assigned_by_fkey (admin who assigned the role)
             response = (
                 self.client.table('profiles')
-                .select('email, first_name, last_name, user_roles(role_id, roles(name))')
+                .select('email, first_name, last_name, user_roles!user_roles_user_id_fkey(role_id, roles(name))')
                 .eq('user_id', user_id)
                 .single()
                 .execute()

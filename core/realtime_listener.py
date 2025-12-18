@@ -2,14 +2,17 @@
 Chat Messages Polling Listener
 Polls Supabase chat_messages table for new user messages
 (Polling-based alternative to Realtime since supabase-py has limited async support)
+
+Architecture (Variant C - Hybrid):
+- Checkpointer = memory for LLM (single source of truth for history)
+- chat_messages = UI log (write-only from bot, no read for history)
 """
 import time
 import threading
 from typing import Optional, Set
-from datetime import datetime, timedelta
+from datetime import datetime
 from loguru import logger
 from supabase import create_client, Client
-from langchain_core.messages import HumanMessage, AIMessage
 from core.config import settings
 from agents.orchestrator import OrchestratorAgent
 from database.supabase_client import supabase_db_client
@@ -67,19 +70,26 @@ class RealtimeListener:
                 cutoff_time = self._start_time.strftime("%Y-%m-%dT%H:%M:%S")
 
                 # Query for new user messages created after bot started
+                # Note: We query recent messages and filter by _processed_ids
+                # Using desc=True to get LATEST messages first, then process oldest-first
                 response = self.client.table('chat_messages')\
                     .select('*')\
                     .eq('role', 'user')\
                     .gte('created_at', cutoff_time)\
-                    .order('created_at', desc=False)\
-                    .limit(10)\
+                    .order('created_at', desc=True)\
+                    .limit(50)\
                     .execute()
 
-                # Debug logging
-                logger.info(f"🔍 Polling check - Found {len(response.data) if response.data else 0} new user messages since {cutoff_time}")
-
                 if response.data:
-                    for message in response.data:
+                    # Reverse to process oldest-first (we queried desc=True for latest)
+                    messages_to_process = list(reversed(response.data))
+
+                    # Count new messages (not in _processed_ids)
+                    new_count = sum(1 for m in messages_to_process if m['id'] not in self._processed_ids)
+                    if new_count > 0:
+                        logger.info(f"📬 {new_count} NEW messages to process (out of {len(messages_to_process)} total)")
+
+                    for message in messages_to_process:
                         message_id = message['id']
 
                         # Skip if already processed
@@ -92,9 +102,11 @@ class RealtimeListener:
                         # Handle the message
                         self._handle_message(message)
 
-                        # Clean old IDs from set (keep only last 100)
-                        if len(self._processed_ids) > 100:
-                            self._processed_ids = set(list(self._processed_ids)[-100:])
+                    # Clean old IDs from set (keep only last 500 to handle high volume)
+                    if len(self._processed_ids) > 500:
+                        # Convert to list, sort, keep last 500
+                        sorted_ids = sorted(self._processed_ids)
+                        self._processed_ids = set(sorted_ids[-500:])
 
             except Exception as e:
                 logger.error(f"Error polling messages: {e}")
@@ -104,102 +116,66 @@ class RealtimeListener:
 
     def _handle_message(self, record: dict):
         """
-        Handle new user message
-        Loads conversation history from chat_messages table and processes with agent
+        Handle new user message.
+
+        Architecture (Variant C - Hybrid):
+        - Checkpointer = memory for LLM (single source of truth for history)
+        - chat_messages = UI log (write-only, no read for history)
+
+        This prevents double history loading and token overflow.
         """
         try:
             conversation_id = record['conversation_id']
             user_message = record['content']
             user_id = record['user_id']
 
-            logger.info(f"📨 Processing message from conversation: {conversation_id}")
+            logger.info(f"📨 Processing message from conversation: {conversation_id}, user_id: {user_id}")
+            logger.debug(f"📋 Full record: {record}")
 
-            # Fetch user profile (NEW)
+            # Fetch user profile for context injection
             user_context = None
             if user_id and supabase_db_client.is_available():
                 user_context = supabase_db_client.get_user_profile(user_id)
                 if user_context:
-                    logger.info(f"👤 Loaded profile: {user_context.get('first_name', '')} {user_context.get('last_name', '')}")
+                    logger.info(f"👤 Loaded profile: {user_context.get('first_name', '')} {user_context.get('last_name', '')} (role: {user_context.get('role_name', 'guest')})")
 
-            # Load conversation history from Supabase
-            messages = []
-            if supabase_db_client.is_available():
-                history = supabase_db_client.get_conversation_history(conversation_id, limit=20)
-                for msg in history:
-                    if msg.get('role') == 'user':
-                        messages.append(HumanMessage(content=msg.get('content', '')))
-                    elif msg.get('role') == 'assistant':
-                        messages.append(AIMessage(content=msg.get('content', '')))
-                logger.info(f"📜 Loaded {len(messages)} messages from history")
-                # Debug: show what messages we loaded
-                for i, msg in enumerate(messages):
-                    msg_type = "USER" if isinstance(msg, HumanMessage) else "BOT"
-                    preview = msg.content[:80].replace('\n', ' ')
-                    logger.debug(f"  [{i}] {msg_type}: {preview}...")
+            # NOTE: We do NOT load history from chat_messages anymore!
+            # Checkpointer handles history automatically via thread_id.
+            # This prevents double history (chat_messages + checkpointer) that caused token overflow.
 
-            # Add current user message if not already in history
-            if not messages or messages[-1].content != user_message:
-                messages.append(HumanMessage(content=user_message))
-                logger.debug(f"  [+] Added current message: {user_message[:80]}...")
+            logger.info(f"📤 Sending message to agent (history managed by checkpointer)")
 
-            logger.info(f"📤 Sending {len(messages)} total messages to agent")
-
-            # Process with orchestrator agent (with full history and user context)
-            # Note: This uses agent.agent.invoke() directly to support full message history
-            # User context is injected via system prompt by creating temp agent
-            config = {"configurable": {"thread_id": conversation_id}}
-
-            # Build effective system prompt with user context
-            effective_system_prompt = self.agent.system_prompt
-            if user_context:
-                context_text = self.agent._format_user_context(user_context)
-                if context_text:
-                    effective_system_prompt = f"{self.agent.system_prompt}\n\n{context_text}"
-                    logger.info(f"Added user context to system prompt for conversation {conversation_id}")
-
-            # Create temporary agent with updated system prompt
-            from langgraph.prebuilt import create_react_agent
-            temp_agent = create_react_agent(
-                model=self.agent.llm,
-                tools=self.agent.tools,
-                state_modifier=effective_system_prompt,
-                checkpointer=self.agent.checkpointer
+            # Use orchestrator's process_message which handles:
+            # - Checkpointer for history (via thread_id = conversation_id)
+            # - User context injection
+            # - RBAC role setting
+            bot_response = self.agent.process_message(
+                user_message=user_message,
+                thread_id=conversation_id,
+                user_context=user_context
             )
-
-            # Invoke with full message history
-            response = temp_agent.invoke(
-                {"messages": messages},
-                config=config
-            )
-
-            # Extract bot response from agent output
-            if isinstance(response, dict) and "messages" in response:
-                last_message = response["messages"][-1]
-                if hasattr(last_message, 'content'):
-                    bot_response = str(last_message.content)
-                else:
-                    bot_response = str(last_message)
-            else:
-                bot_response = str(response)
 
             logger.info(f"🤖 Generated response (length: {len(bot_response)} chars)")
 
-            # Write bot response to database
+            # Write bot response to chat_messages (for UI display)
             if supabase_db_client.is_available():
-                supabase_db_client.insert_message(
+                result = supabase_db_client.insert_message(
                     conversation_id=conversation_id,
                     content=bot_response,
                     user_id=user_id,
-                    role='assistant',  # Bot writes as 'assistant' (won't trigger listener)
+                    role='assistant',
                     metadata=record.get('metadata')
                 )
-                logger.success(f"✅ Response sent for conversation: {conversation_id}")
+                if result:
+                    logger.success(f"✅ Response sent for conversation: {conversation_id}, message_id: {result.get('id')}")
+                else:
+                    logger.error(f"❌ Failed to insert response for conversation: {conversation_id}")
             else:
                 logger.error("Supabase DB client unavailable - cannot write response")
 
         except Exception as e:
             logger.error(f"Error handling message: {e}")
-            # Optionally: Write error message to chat
+            # Write error message to chat
             try:
                 if supabase_db_client.is_available():
                     supabase_db_client.insert_message(

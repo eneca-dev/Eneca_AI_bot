@@ -3,11 +3,14 @@ from typing import List, Optional, Dict, Any
 from agents.base import BaseAgent
 from langgraph.prebuilt import create_react_agent
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 from core.config import settings
 from core.memory import memory_manager
 from core.agent_registry import agent_registry
 from loguru import logger
+
+# Maximum number of messages to keep in history (prevents token overflow)
+MAX_HISTORY_MESSAGES = 20
 
 
 class OrchestratorAgent(BaseAgent):
@@ -65,11 +68,12 @@ class OrchestratorAgent(BaseAgent):
         # Get checkpointer from memory manager
         checkpointer = memory_manager.get_checkpointer()
 
-        # Create ReAct agent with LangGraph
+        # Create ReAct agent with LangGraph 1.0
+        # Note: 'prompt' replaces 'state_modifier' in LangGraph 1.0
         agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
-            state_modifier=self.system_prompt,  # System prompt for the agent (updated for LangGraph 0.2.x)
+            prompt=self.system_prompt,  # System prompt for the agent (LangGraph 1.0 API)
             checkpointer=checkpointer  # Enable conversation memory
         )
 
@@ -129,12 +133,38 @@ class OrchestratorAgent(BaseAgent):
                     effective_system_prompt = f"{self.system_prompt}\n\n{context_text}"
                     logger.info(f"Added user context to system prompt for thread '{thread_id}'")
 
-            # Create temporary agent with updated system prompt
+            # Create prompt function that:
+            # 1. Trims history to prevent token overflow
+            # 2. Adds system prompt with user context
+            # Note: In LangGraph 1.0, 'prompt' replaces 'state_modifier'
+            def prompt_fn(state):
+                """Prepare messages for LLM: trim history + add system prompt"""
+                messages = state.get("messages", [])
+
+                # Trim messages to last N to prevent token overflow
+                trimmed = trim_messages(
+                    messages,
+                    max_tokens=MAX_HISTORY_MESSAGES,  # Using count, not actual tokens
+                    strategy="last",
+                    token_counter=len,  # Count messages, not tokens
+                    start_on="human",  # Start from human message
+                    include_system=True,
+                    allow_partial=False,
+                )
+
+                # Log trimming info
+                if len(messages) > len(trimmed):
+                    logger.debug(f"Trimmed history: {len(messages)} -> {len(trimmed)} messages")
+
+                # Add system prompt at the beginning
+                return [{"role": "system", "content": effective_system_prompt}] + list(trimmed)
+
+            # Create temporary agent with prompt function
             # LangGraph agents are lightweight, OK to recreate for each message
             temp_agent = create_react_agent(
                 model=self.llm,
                 tools=self.tools,
-                state_modifier=effective_system_prompt,  # Updated prompt with context
+                prompt=prompt_fn,  # Function that trims + adds system prompt (LangGraph 1.0 API)
                 checkpointer=self.checkpointer
             )
 

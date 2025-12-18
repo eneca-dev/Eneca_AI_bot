@@ -162,7 +162,7 @@ def process_webhook_message(record: SupabaseWebhookRecord):
         # 2. Write response to Supabase
         if supabase_db_client.is_available():
             result = supabase_db_client.insert_message(
-                thread_id=thread_id,
+                conversation_id=thread_id,  # thread_id == conversation_id
                 content=bot_response,
                 user_id=user_id,
                 role="assistant",
@@ -183,7 +183,7 @@ def process_webhook_message(record: SupabaseWebhookRecord):
         try:
             if supabase_db_client.is_available():
                 supabase_db_client.insert_message(
-                    thread_id=thread_id,
+                    conversation_id=thread_id,  # thread_id == conversation_id
                     content="Извините, произошла ошибка при обработке вашего сообщения. Пожалуйста, попробуйте еще раз.",
                     user_id=user_id,
                     role="assistant"

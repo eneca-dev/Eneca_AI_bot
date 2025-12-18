@@ -262,6 +262,9 @@ class AgentRegistry:
             def make_tool_func(agent_inst, agent_name):
                 def tool_func(query: str) -> str:
                     """Tool function that calls the agent with optional user_role from thread-local"""
+                    # DEBUG: Log tool invocation
+                    logger.info(f"🔧 TOOL CALLED: '{agent_name}' with query: '{query[:100]}...'")
+
                     try:
                         # Get current user role from thread-local storage (RBAC integration)
                         user_role = get_current_user_role()
@@ -271,18 +274,24 @@ class AgentRegistry:
                             sig = inspect.signature(agent_inst.answer_question)
                             if 'user_role' in sig.parameters:
                                 logger.debug(f"Calling {agent_name}.answer_question with user_role={user_role}")
-                                return agent_inst.answer_question(query, user_role=user_role)
+                                result = agent_inst.answer_question(query, user_role=user_role)
                             else:
-                                return agent_inst.answer_question(query)
+                                result = agent_inst.answer_question(query)
                         elif hasattr(agent_inst, 'process_message'):
                             sig = inspect.signature(agent_inst.process_message)
                             if 'user_role' in sig.parameters:
                                 logger.debug(f"Calling {agent_name}.process_message with user_role={user_role}")
-                                return agent_inst.process_message(query, user_role=user_role)
+                                result = agent_inst.process_message(query, user_role=user_role)
                             else:
-                                return agent_inst.process_message(query)
+                                result = agent_inst.process_message(query)
                         else:
                             return f"Агент '{agent_name}' не поддерживает обработку запросов"
+
+                        # DEBUG: Log tool result
+                        logger.info(f"🔧 TOOL RESULT from '{agent_name}': {len(result)} chars")
+                        logger.debug(f"🔧 TOOL RESULT preview: '{result[:200]}...'")
+
+                        return result
                     except Exception as e:
                         logger.error(f"Error in tool for agent '{agent_name}': {e}")
                         return f"Ошибка при вызове агента '{agent_name}': {str(e)}"

@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     orchestrator_model: str = Field("gpt-4o", alias="ORCHESTRATOR_MODEL")
     orchestrator_temperature: float = Field(0.7, alias="ORCHESTRATOR_TEMPERATURE")
     rag_agent_model: str = Field("gpt-4o", alias="RAG_AGENT_MODEL")
-    rag_agent_temperature: float = Field(0.3, alias="RAG_AGENT_TEMPERATURE")
+    rag_agent_temperature: float = Field(0.5, alias="RAG_AGENT_TEMPERATURE")
     max_agent_iterations: int = Field(5, alias="MAX_AGENT_ITERATIONS")
     agent_max_iterations: int = Field(10, alias="AGENT_MAX_ITERATIONS")
     agent_timeout: int = Field(300, alias="AGENT_TIMEOUT")
@@ -60,19 +60,17 @@ class Settings(BaseSettings):
     # Similarity threshold: 0.7-0.9 for high-quality matches (lowered to 0.35 if encoding issues exist)
     similarity_threshold: float = Field(0.7, alias="SIMILARITY_THRESHOLD")
 
+    # Cohere Reranker Configuration
+    cohere_api_key: Optional[str] = Field(None, alias="COHERE_API_KEY")
+    rerank_enabled: bool = Field(True, alias="RERANK_ENABLED")
+    rerank_top_n: int = Field(3, alias="RERANK_TOP_N")
+    rerank_model: str = Field("rerank-multilingual-v3.0", alias="RERANK_MODEL")
+
     # Memory Configuration
+    # Options: "memory" (in-memory, fast but lost on restart), "sqlite" (persistent)
     enable_conversation_memory: bool = Field(default=True, alias="ENABLE_CONVERSATION_MEMORY")
-    memory_type: str = Field(default="memory", alias="MEMORY_TYPE")  # Options: "memory", "sqlite", "postgres", "redis"
+    memory_type: str = Field(default="sqlite", alias="MEMORY_TYPE")
     memory_db_path: str = Field(default="data/checkpoints.db", alias="MEMORY_DB_PATH")
-
-    # PostgreSQL Configuration (for PostgreSQL checkpointer)
-    # Note: Supabase PostgreSQL connection uses the following format:
-    # postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
-    postgres_connection_string: Optional[str] = Field(None, alias="POSTGRES_CONNECTION_STRING")
-
-    # Supabase Memory Configuration (when MEMORY_TYPE=supabase)
-    # Uses n8n_chat_histories table for conversation persistence
-    memory_supabase_table: str = Field("n8n_chat_histories", alias="MEMORY_SUPABASE_TABLE")
 
     class Config:
         # Use absolute path to ensure .env is found regardless of working directory
