@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, AsyncIterator
 from agents.orchestrator import OrchestratorAgent
+from agents.analytics_agent import AnalyticsAgent, AnalyticsResult
 from core.config import settings
 from loguru import logger
 import uuid
@@ -28,8 +29,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize orchestrator agent (singleton)
+# Initialize agents (singletons)
 agent = None
+analytics_agent = None
 
 def get_agent() -> OrchestratorAgent:
     """Get or create orchestrator agent instance"""
@@ -39,6 +41,16 @@ def get_agent() -> OrchestratorAgent:
         agent = OrchestratorAgent()
         logger.info("OrchestratorAgent initialized successfully")
     return agent
+
+
+def get_analytics_agent() -> AnalyticsAgent:
+    """Get or create analytics agent instance"""
+    global analytics_agent
+    if analytics_agent is None:
+        logger.info("Initializing AnalyticsAgent...")
+        analytics_agent = AnalyticsAgent()
+        logger.info("AnalyticsAgent initialized successfully")
+    return analytics_agent
 
 
 async def verify_api_key(x_api_key: str = Header(None, alias=settings.api_key_header)):
@@ -86,6 +98,25 @@ class WebhookResponse(BaseModel):
     thread_id: str
     user_id: Optional[str] = None
     chat_id: Optional[str] = None
+    success: bool = True
+    error: Optional[str] = None
+
+
+class AnalyticsRequest(BaseModel):
+    """Analytics request model"""
+    query: str
+    user_id: Optional[str] = None
+    user_role: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AnalyticsResponse(BaseModel):
+    """Analytics response model"""
+    type: str  # "text", "table", "chart", "mixed"
+    content: Any  # String, list, or dict depending on type
+    sql_query: Optional[str] = None
+    chart_config: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = {}
     success: bool = True
     error: Optional[str] = None
 
@@ -297,6 +328,103 @@ async def chat_stream(
             "X-Accel-Buffering": "no"  # Disable nginx buffering
         }
     )
+
+
+@app.post("/api/analytics", response_model=AnalyticsResponse)
+async def analytics_endpoint(
+    request: AnalyticsRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Analytics endpoint for data analysis, reporting, and visualization
+
+    Headers (if API_KEY is configured in .env):
+        X-API-Key: your_api_key
+
+    Expected payload:
+    {
+        "query": "Natural language query for analytics",
+        "user_id": "optional-user-id",
+        "user_role": "optional-user-role (admin/manager/engineer/viewer/guest)",
+        "metadata": {}
+    }
+
+    Returns:
+    {
+        "type": "text|table|chart|mixed",
+        "content": "Result data (format depends on type)",
+        "sql_query": "SQL query used (for transparency)",
+        "chart_config": "Chart.js configuration (if type=chart)",
+        "metadata": {
+            "row_count": 10,
+            "execution_time": 0.123
+        },
+        "success": true
+    }
+
+    Examples:
+    - "Покажи количество проектов по статусам" → returns chart with pie chart config
+    - "Статистика завершенных объектов за последний месяц" → returns table
+    - "Сравни прогресс проектов" → returns comparison table
+    """
+    try:
+        from database.supabase_client import supabase_db_client
+
+        logger.info(f"📊 Received analytics request: query='{request.query}', user_id={request.user_id}")
+
+        # Get analytics agent
+        agent_instance = get_analytics_agent()
+
+        # Determine user role for RBAC
+        user_role = request.user_role
+
+        if not user_role and request.user_id:
+            # Load user role from database
+            if supabase_db_client.is_available():
+                user_context = supabase_db_client.get_user_profile(request.user_id)
+                if user_context:
+                    user_role = user_context.get('role_name', 'guest')
+                    logger.info(f"Loaded user role from DB: {user_role}")
+                else:
+                    user_role = 'guest'
+                    logger.warning(f"No profile found for user_id={request.user_id}, using guest role")
+            else:
+                user_role = 'guest'
+                logger.warning("Supabase not available, using guest role")
+        elif not user_role:
+            user_role = 'guest'
+            logger.info("No user_role or user_id provided, using guest role")
+
+        # Process analytics query
+        logger.info(f"Processing analytics query with role: {user_role}")
+        result: AnalyticsResult = agent_instance.process_analytics(
+            user_query=request.query,
+            user_role=user_role
+        )
+
+        logger.info(f"Analytics result generated: type={result.type}, rows={result.metadata.get('row_count', 0)}")
+
+        # Create response
+        response = AnalyticsResponse(
+            type=result.type,
+            content=result.content,
+            sql_query=result.sql_query,
+            chart_config=result.chart_config,
+            metadata=result.metadata,
+            success=True
+        )
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error processing analytics request: {e}", exc_info=True)
+        return AnalyticsResponse(
+            type="text",
+            content=f"Произошла ошибка при обработке аналитического запроса: {str(e)}",
+            metadata={"error": str(e)},
+            success=False,
+            error=str(e)
+        )
 
 
 @app.post("/api/debug")

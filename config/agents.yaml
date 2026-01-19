@@ -54,6 +54,10 @@ agents:
       temperature: 0.3
       # mcp_url now loaded from settings.mcp_server_url (.env)
 
+  # NOTE: Analytics Agent is a STANDALONE service (not part of orchestrator)
+  # Access via direct endpoint: POST /api/analytics
+  # See docs/ANALYTICS_AGENT.md for details
+
   # Web Search Agent - поиск в интернете (пример)
   # - name: web_search
   #   class_path: agents.web_search.WebSearchAgent
