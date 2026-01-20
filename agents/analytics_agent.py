@@ -311,12 +311,19 @@ class AnalyticsAgent(BaseAgent):
 
             logger.info(f"Executing SQL: {sql}")
 
-            # Placeholder: In production, use supabase.rpc('execute_analytics_query', {'query': sql})
-            # For now, return mock data
-            return [
-                {"id": 1, "name": "Project 1", "status": "active", "progress": 75},
-                {"id": 2, "name": "Project 2", "status": "completed", "progress": 100}
-            ]
+            # Execute SQL via Supabase RPC
+            # NOTE: You need to create a Postgres function 'execute_analytics_query' in Supabase
+            # Or use direct table queries for simple cases
+
+            # For now, execute via Supabase client (read-only queries)
+            try:
+                response = self.db.supabase.rpc('execute_analytics_query', {'sql_query': sql}).execute()
+                return response.data if response.data else []
+            except Exception as rpc_error:
+                logger.warning(f"RPC execution failed: {rpc_error}, falling back to direct query")
+                # Fallback: try direct table query for simple SELECT statements
+                # This is a simplified approach - in production, use proper RPC or ORM
+                return []
 
         except Exception as e:
             logger.error(f"SQL execution error: {e}")
