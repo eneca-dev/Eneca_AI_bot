@@ -3,7 +3,7 @@ python-telegram-bot==21.0.1
 
 # LangChain and AI (compatible versions)
 langchain==0.3.13
-langchain-core>=0.2.43,<0.3.0
+langchain-core>=0.3.26,<0.4.0
 langchain-openai==0.2.14
 langchain-community==0.3.13
 langsmith==0.2.4
