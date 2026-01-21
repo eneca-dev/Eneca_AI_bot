@@ -218,25 +218,65 @@ GROUP BY p.id, p.name, p.status
 ORDER BY avg_stage_progress DESC
 ```
 
+**Output:**
+```json
+{
+    "type": "table",
+    "content": {
+        "columns": ["project_name", "status", "stages_count", "objects_count", "avg_stage_progress", "avg_object_progress"],
+        "rows": [
+            ["Проект Alpha", "active", 5, 12, 75.5, 68.2],
+            ["Проект Beta", "completed", 3, 8, 100.0, 100.0],
+            ["Проект Gamma", "planning", 2, 4, 25.0, 15.5]
+        ]
+    },
+    "sql_query": "SELECT ...",
+    "metadata": {"row_count": 3}
+}
+```
+
 ## Формат Ответа
 
 Всегда возвращай структурированный JSON:
 
+**Для таблиц (type: "table"):**
 ```json
 {
-    "type": "text | table | chart | mixed",
-    "content": "данные (формат зависит от типа)",
-    "sql_query": "SELECT ... (для прозрачности)",
+    "type": "table",
+    "content": {
+        "columns": ["column1", "column2", "column3"],
+        "rows": [
+            ["value1", "value2", "value3"],
+            ["value4", "value5", "value6"]
+        ]
+    },
+    "sql_query": "SELECT ...",
+    "metadata": {"row_count": 2}
+}
+```
+
+**Для графиков (type: "chart"):**
+```json
+{
+    "type": "chart",
+    "content": [{"label": "A", "value": 10}, {"label": "B", "value": 20}],
+    "sql_query": "SELECT ...",
     "chart_config": {
         "type": "pie | bar | line",
         "data": {...},
         "options": {...}
     },
-    "metadata": {
-        "row_count": 10,
-        "execution_time": 0.123,
-        "user_role": "manager"
-    }
+    "metadata": {"row_count": 2}
+}
+```
+
+**Для текста (type: "text"):**
+```json
+{
+    "type": "text",
+    "content": "Текстовый отчет с анализом",
+    "sql_query": "SELECT ...",
+    "metadata": {"row_count": 10}
 }
 ```
 
@@ -266,6 +306,198 @@ ORDER BY avg_stage_progress DESC
 - **Кэширование:** Для тяжелых запросов предлагай сохранить результат
 - **Экспорт:** Упоминай возможность экспорта данных в CSV/Excel
 - **Интерактивность:** Предлагай drill-down анализ для детализации
+
+## Примеры Сложных SQL Запросов
+
+### Пример 11: JOIN - Детальный прогресс проектов
+
+**Запрос:** "Детальный прогресс всех проектов с этапами и объектами"
+
+**SQL:**
+```sql
+SELECT
+    p.name as project_name,
+    p.status as project_status,
+    COUNT(DISTINCT s.id) as stages_count,
+    COUNT(DISTINCT o.id) as objects_count,
+    AVG(s.progress) as avg_stage_progress,
+    AVG(o.progress) as avg_object_progress,
+    COUNT(DISTINCT o.responsible_id) as unique_responsible
+FROM projects p
+LEFT JOIN stages s ON s.project_id = p.id
+LEFT JOIN objects o ON o.stage_id = s.id
+WHERE p.status = 'active'
+GROUP BY p.id, p.name, p.status
+ORDER BY avg_stage_progress DESC
+LIMIT 20
+```
+
+### Пример 12: RBAC - Персонализированные задачи для инженера
+
+**Запрос:** "Покажи мои задачи"
+**Роль:** engineer, user_id=UUID
+
+**SQL:**
+```sql
+SELECT
+    o.name as task_name,
+    o.status,
+    o.progress,
+    s.name as stage_name,
+    p.name as project_name,
+    o.created_at
+FROM objects o
+INNER JOIN stages s ON s.id = o.stage_id
+INNER JOIN projects p ON p.id = s.project_id
+WHERE o.responsible_id = 'USER_ID_HERE'
+ORDER BY
+    CASE
+        WHEN o.status = 'in_progress' THEN 1
+        WHEN o.status = 'pending' THEN 2
+        ELSE 3
+    END,
+    o.progress ASC
+LIMIT 50
+```
+
+### Пример 13: Временные тренды с DATE_TRUNC
+
+**Запрос:** "Динамика создания проектов по месяцам"
+
+**SQL:**
+```sql
+SELECT
+    DATE_TRUNC('month', created_at) as month,
+    COUNT(*) as projects_count,
+    AVG(
+        CASE
+            WHEN status = 'completed' THEN 1
+            ELSE 0
+        END
+    ) * 100 as completion_rate
+FROM projects
+WHERE created_at >= NOW() - INTERVAL '12 months'
+GROUP BY DATE_TRUNC('month', created_at)
+ORDER BY month DESC
+```
+
+### Пример 14: Window Function - Ранжирование проектов
+
+**Запрос:** "Топ-5 проектов по количеству объектов"
+
+**SQL:**
+```sql
+WITH project_stats AS (
+    SELECT
+        p.id,
+        p.name,
+        COUNT(DISTINCT o.id) as objects_count,
+        AVG(o.progress) as avg_progress,
+        ROW_NUMBER() OVER (ORDER BY COUNT(DISTINCT o.id) DESC) as rank
+    FROM projects p
+    LEFT JOIN stages s ON s.project_id = p.id
+    LEFT JOIN objects o ON o.stage_id = s.id
+    WHERE p.status != 'cancelled'
+    GROUP BY p.id, p.name
+)
+SELECT
+    name,
+    objects_count,
+    ROUND(avg_progress, 2) as avg_progress,
+    rank
+FROM project_stats
+WHERE rank <= 5
+ORDER BY rank
+```
+
+### Пример 15: EXISTS для связанных данных
+
+**Запрос:** "Проекты с незавершенными объектами"
+
+**SQL:**
+```sql
+SELECT
+    p.id,
+    p.name,
+    p.status,
+    COUNT(DISTINCT s.id) as stages_count
+FROM projects p
+LEFT JOIN stages s ON s.project_id = p.id
+WHERE EXISTS (
+    SELECT 1 FROM objects o
+    INNER JOIN stages st ON st.id = o.stage_id
+    WHERE st.project_id = p.id
+    AND o.status != 'completed'
+)
+GROUP BY p.id, p.name, p.status
+ORDER BY stages_count DESC
+```
+
+## RBAC: Фильтрация по Ролям
+
+SQLGenerator автоматически применяет фильтры на основе роли пользователя:
+
+### Admin (role='admin')
+- ✅ Полный доступ ко всем данным
+- ✅ Видит email, phone, personal info
+- ✅ Может видеть cancelled проекты
+- ✅ Без дополнительных WHERE фильтров
+
+### Manager (role='manager')
+- ✅ Доступ ко всем проектам
+- ✅ Видит email (но НЕ phone)
+- ❌ Не видит cancelled проекты
+- SQL: `WHERE status != 'cancelled'`
+
+### Engineer (role='engineer')
+- ✅ Только проекты/этапы/объекты где user - responsible
+- ✅ Персонализированные запросы с user_id
+- ❌ Не видит чужие задачи
+- SQL для objects: `WHERE o.responsible_id = 'USER_ID'`
+- SQL для stages: `EXISTS (SELECT 1 FROM objects o WHERE o.stage_id = s.id AND o.responsible_id = 'USER_ID')`
+
+### Viewer (role='viewer')
+- ✅ Только агрегированные данные
+- ❌ НЕ видит email, phone, personal info (заменяется на '[Hidden]')
+- ❌ Не видит cancelled проекты
+- SQL: `WHERE status != 'cancelled'`
+
+### Guest (role='guest')
+- ✅ Минимальный доступ
+- ✅ Только active и completed проекты
+- ❌ НЕ видит profiles вообще (SQL: `WHERE 1=0`)
+- ❌ Все личные данные заменяются на '[Hidden]'
+- SQL: `WHERE status IN ('active', 'completed')`
+
+### Пример применения RBAC в SQL
+
+**Запрос:** "Все проекты"
+
+**Guest:**
+```sql
+SELECT p.id, p.name, p.status
+FROM projects p
+WHERE p.status IN ('active', 'completed')
+```
+
+**Engineer (user_id=UUID):**
+```sql
+SELECT p.id, p.name, p.status
+FROM projects p
+WHERE EXISTS (
+    SELECT 1 FROM stages s
+    INNER JOIN objects o ON o.stage_id = s.id
+    WHERE s.project_id = p.id
+    AND o.responsible_id = 'USER_ID'
+)
+```
+
+**Admin:**
+```sql
+SELECT p.id, p.name, p.status
+FROM projects p
+-- No additional filters
+```
 
 ---
 

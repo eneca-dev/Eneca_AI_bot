@@ -1,74 +1,18 @@
 """Analytics Agent for data analysis, reporting, and visualization"""
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Literal, Union
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Dict, Any, List, Optional
+import json
+import time
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from agents.base import BaseAgent
 from database.supabase_client import supabase_db_client
 from core.config import settings
-from loguru import logger
-import json
+from agents.sql_generator import SQLGenerator
 
-
-class FilterOptions(BaseModel):
-    """Filter options for analytics queries"""
-    model_config = ConfigDict(extra="forbid")
-
-    status: Optional[str] = Field(None, description="Filter by status (active, completed, etc.)")
-    date_range: Optional[str] = Field(None, description="Date range filter (last_week, last_month, etc.)")
-    responsible: Optional[str] = Field(None, description="Filter by responsible person ID")
-    department: Optional[str] = Field(None, description="Filter by department")
-    project_id: Optional[str] = Field(None, description="Filter by specific project ID")
-    start_date: Optional[str] = Field(None, description="Start date for date range (ISO format)")
-    end_date: Optional[str] = Field(None, description="End date for date range (ISO format)")
-
-
-class AnalyticsQuery(BaseModel):
-    """Structured analytics query"""
-    intent: Literal["report", "chart", "statistics", "sql_query", "comparison"] = Field(
-        description="Type of analytics operation"
-    )
-    entities: List[str] = Field(
-        default_factory=list,
-        description="Entities involved (projects, users, stages, etc.)"
-    )
-    metrics: List[str] = Field(
-        default_factory=list,
-        description="Metrics to analyze (count, sum, avg, progress, etc.)"
-    )
-    filters: FilterOptions = Field(
-        default_factory=FilterOptions,
-        description="Filters to apply (date_range, status, responsible, etc.)"
-    )
-    aggregation: Optional[str] = Field(
-        None,
-        description="Aggregation type (daily, weekly, monthly, by_user, by_project)"
-    )
-    chart_type: Optional[Literal["bar", "line", "pie", "table", "mixed"]] = Field(
-        None,
-        description="Type of visualization"
-    )
-
-
-class AnalyticsResult(BaseModel):
-    """Structured analytics result"""
-    type: Literal["text", "table", "chart", "mixed"] = Field(
-        description="Type of result"
-    )
-    content: Union[str, Dict[str, Any], List[Dict[str, Any]]] = Field(
-        description="Result content"
-    )
-    sql_query: Optional[str] = Field(
-        None,
-        description="SQL query used (for transparency)"
-    )
-    chart_config: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Chart.js configuration for frontend"
-    )
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional metadata (row_count, execution_time, etc.)"
-    )
+# Import shared models to avoid circular import
+from agents.analytics_models import FilterOptions, AnalyticsQuery, AnalyticsResult
 
 
 class AnalyticsAgent(BaseAgent):
@@ -99,6 +43,15 @@ class AnalyticsAgent(BaseAgent):
 
         # Configure LLM with structured output
         self.query_llm = self.llm.with_structured_output(AnalyticsQuery)
+
+        # Initialize SQL Generator
+        self.sql_generator = SQLGenerator()
+
+        # Initialize circuit breaker for SQL execution protection
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            recovery_timeout=60
+        )
 
         logger.info(f"AnalyticsAgent initialized with model {model}")
 
@@ -185,149 +138,201 @@ class AnalyticsAgent(BaseAgent):
                 metrics=["count"]
             )
 
-    def _generate_sql(self, parsed_query: AnalyticsQuery, user_role: Optional[str] = None) -> str:
+    def _generate_sql(
+        self,
+        parsed_query: AnalyticsQuery,
+        user_role: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> str:
         """
-        Generate SQL query from structured analytics query
+        Generate SQL using SQLGenerator with RBAC
 
         Args:
-            parsed_query: Structured query
-            user_role: User role for RLS
+            parsed_query: Structured analytics query
+            user_role: User's role for RBAC filtering
+            user_id: User's ID for personalized queries
 
         Returns:
             SQL query string
         """
-        # Map intent to SQL templates
-        if parsed_query.intent == "report":
-            return self._generate_report_sql(parsed_query)
-        elif parsed_query.intent == "chart":
-            return self._generate_chart_sql(parsed_query)
-        elif parsed_query.intent == "statistics":
-            return self._generate_statistics_sql(parsed_query)
-        elif parsed_query.intent == "comparison":
-            return self._generate_comparison_sql(parsed_query)
-        else:
-            return self._generate_generic_sql(parsed_query)
+        # Generate SQL with parameters
+        sql, params = self.sql_generator.generate_sql(
+            parsed_query,
+            user_role or 'guest',
+            user_id
+        )
 
-    def _generate_report_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for reports"""
-        entity = query.entities[0] if query.entities else "projects"
+        # Inject parameters safely (escape SQL injection)
+        sql = self.sql_generator._inject_parameters_safe(sql, params)
 
-        # Example: Project report
-        if entity == "projects":
-            sql = """
-            SELECT
-                p.id,
-                p.name,
-                p.status,
-                COUNT(DISTINCT s.id) as stages_count,
-                AVG(s.progress) as avg_progress,
-                p.created_at
-            FROM projects p
-            LEFT JOIN stages s ON s.project_id = p.id
-            """
+        logger.info(f"Generated SQL: {sql[:200]}...")
+        return sql
 
-            # Add filters
-            conditions = []
-            if query.filters.status:
-                conditions.append(f"p.status = '{query.filters.status}'")
-            if query.filters.date_range:
-                conditions.append("p.created_at >= NOW() - INTERVAL '30 days'")
-
-            if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
-
-            sql += " GROUP BY p.id, p.name, p.status, p.created_at ORDER BY p.created_at DESC"
-            return sql
-
-        return "SELECT * FROM projects LIMIT 10"
-
-    def _generate_chart_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for chart data"""
-        entity = query.entities[0] if query.entities else "projects"
-
-        # Example: Status distribution
-        if "count" in query.metrics:
-            return f"""
-            SELECT
-                {entity[:-1]}_status as label,
-                COUNT(*) as value
-            FROM {entity}
-            GROUP BY {entity[:-1]}_status
-            ORDER BY value DESC
-            """
-
-        return f"SELECT COUNT(*) as count FROM {entity}"
-
-    def _generate_statistics_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for statistics"""
-        entity = query.entities[0] if query.entities else "projects"
-
-        return f"""
-        SELECT
-            COUNT(*) as total_count,
-            COUNT(DISTINCT responsible_id) as unique_users,
-            AVG(progress) as avg_progress,
-            MIN(created_at) as earliest_date,
-            MAX(updated_at) as latest_update
-        FROM {entity}
+    def _execute_sql(
+        self,
+        sql: str,
+        user_role: str = 'guest'
+    ) -> List[Dict[str, Any]]:
         """
-
-    def _generate_comparison_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for comparisons"""
-        return """
-        SELECT
-            p.name as project_name,
-            AVG(s.progress) as avg_progress,
-            COUNT(s.id) as stages_count
-        FROM projects p
-        LEFT JOIN stages s ON s.project_id = p.id
-        GROUP BY p.id, p.name
-        ORDER BY avg_progress DESC
-        """
-
-    def _generate_generic_sql(self, query: AnalyticsQuery) -> str:
-        """Fallback SQL generator"""
-        entity = query.entities[0] if query.entities else "projects"
-        return f"SELECT * FROM {entity} LIMIT 10"
-
-    def _execute_sql(self, sql: str) -> List[Dict[str, Any]]:
-        """
-        Execute SQL query safely
+        Execute SQL with retry logic and circuit breaker
 
         Args:
             sql: SQL query (SELECT only)
+            user_role: User role for sensitive column filtering
 
         Returns:
             Query results as list of dicts
         """
+        # Security check
+        if not sql.strip().upper().startswith("SELECT"):
+            raise ValueError("Only SELECT queries are allowed")
+
+        logger.info(f"Executing SQL for role={user_role}")
+
         try:
-            # Safety check: only SELECT queries
-            if not sql.strip().upper().startswith("SELECT"):
-                raise ValueError("Only SELECT queries are allowed")
+            # Execute with retry
+            data = self._execute_sql_with_retry(sql, user_role)
 
-            # Execute via Supabase RPC or raw SQL
-            # Note: Supabase Python client doesn't support raw SQL directly
-            # You may need to create a Postgres function or use psycopg2
+            # Filter sensitive columns based on role
+            data = self._filter_sensitive_columns(data, user_role)
 
-            logger.info(f"Executing SQL: {sql}")
-
-            # Execute SQL via Supabase RPC
-            # NOTE: You need to create a Postgres function 'execute_analytics_query' in Supabase
-            # Or use direct table queries for simple cases
-
-            # For now, execute via Supabase client (read-only queries)
-            try:
-                response = self.db.supabase.rpc('execute_analytics_query', {'sql_query': sql}).execute()
-                return response.data if response.data else []
-            except Exception as rpc_error:
-                logger.warning(f"RPC execution failed: {rpc_error}, falling back to direct query")
-                # Fallback: try direct table query for simple SELECT statements
-                # This is a simplified approach - in production, use proper RPC or ORM
-                return []
+            return data
 
         except Exception as e:
-            logger.error(f"SQL execution error: {e}")
+            logger.error(f"SQL execution failed after retries: {e}")
             return []
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10)
+    )
+    def _execute_sql_with_retry(
+        self,
+        sql: str,
+        user_role: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute SQL with retry and circuit breaker
+
+        Args:
+            sql: SQL query string
+            user_role: User role for logging
+
+        Returns:
+            Query results
+
+        Raises:
+            Exception: If circuit breaker is open or execution fails
+        """
+        # Check circuit breaker
+        if self.circuit_breaker.is_open():
+            logger.warning("Circuit breaker OPEN - skipping SQL execution")
+            raise Exception("Circuit breaker open")
+
+        # Check if Supabase client is available
+        if not self.db.is_available():
+            logger.error("Supabase client not available")
+            raise Exception("Supabase client not initialized")
+
+        try:
+            # Call RPC function
+            response = self.db.client.rpc(
+                'execute_analytics_query',
+                {'query_text': sql, 'user_role_name': user_role}
+            ).execute()
+
+            # Record success
+            self.circuit_breaker.record_success()
+
+            # Parse JSONB result
+            return self._parse_jsonb_result(response.data)
+
+        except Exception as e:
+            # Record failure
+            self.circuit_breaker.record_failure()
+            logger.error(f"RPC execution failed: {e}")
+            raise
+
+    def _parse_jsonb_result(self, data: List[Dict]) -> List[Dict]:
+        """
+        Parse JSONB from RPC response
+
+        Args:
+            data: Raw RPC response data
+
+        Returns:
+            Parsed list of dicts
+        """
+        if not data:
+            return []
+
+        # RPC returns [{"result": {...}}, {"result": {...}}, ...]
+        if isinstance(data, list) and len(data) > 0:
+            if 'result' in data[0]:
+                return [row['result'] for row in data]
+
+        return data
+
+    def _filter_sensitive_columns(
+        self,
+        data: List[Dict[str, Any]],
+        user_role: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Remove sensitive columns based on user role
+
+        Args:
+            data: Query results
+            user_role: User's role
+
+        Returns:
+            Filtered data
+        """
+        if user_role in ['admin', 'manager']:
+            # Full access
+            return data
+
+        # Define sensitive columns by role
+        sensitive = {
+            'guest': ['email', 'phone', 'password', 'first_name', 'last_name'],
+            'viewer': ['email', 'phone', 'password'],
+            'engineer': ['password']
+        }
+
+        blocked = sensitive.get(user_role, [])
+
+        if not blocked:
+            return data
+
+        # Filter out sensitive columns
+        return [
+            {k: ('[Hidden]' if k in blocked else v) for k, v in row.items()}
+            for row in data
+        ]
+
+    def _prepare_table_data(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Prepare table data in frontend-friendly format
+
+        Args:
+            data: Query results as list of dicts
+
+        Returns:
+            Dict with columns and rows structure
+        """
+        if not data:
+            return {"columns": [], "rows": []}
+
+        # Extract column names from first row
+        columns = list(data[0].keys())
+
+        # Convert list of dicts to list of lists
+        rows = [[row.get(col) for col in columns] for row in data]
+
+        return {
+            "columns": columns,
+            "rows": rows
+        }
 
     def _prepare_chart_data(
         self,
@@ -406,33 +411,35 @@ class AnalyticsAgent(BaseAgent):
     def process_analytics(
         self,
         user_query: str,
-        user_role: Optional[str] = None
+        user_role: Optional[str] = None,
+        user_id: Optional[str] = None
     ) -> AnalyticsResult:
         """
-        Main analytics processing pipeline
+        Main analytics processing pipeline with RBAC support
 
         Args:
             user_query: Natural language query
-            user_role: User role for RBAC
+            user_role: User role for RBAC filtering
+            user_id: User ID for personalized queries
 
         Returns:
             AnalyticsResult with data and visualization config
         """
-        logger.info(f"📊 ANALYTICS AGENT: processing query: '{user_query}'")
+        logger.info(f"📊 ANALYTICS: query='{user_query}', role={user_role}, user_id={user_id}")
 
         try:
             # Step 1: Parse natural language to structured query
             parsed_query = self._parse_user_query(user_query, user_role)
 
-            # Step 2: Generate SQL
-            sql = self._generate_sql(parsed_query, user_role)
+            # Step 2: Generate SQL with RBAC
+            sql = self._generate_sql(parsed_query, user_role, user_id)
 
-            # Step 3: Execute SQL
-            data = self._execute_sql(sql)
+            # Step 3: Execute SQL with retry
+            data = self._execute_sql(sql, user_role or 'guest')
 
             # Step 4: Determine result type
-            if parsed_query.chart_type:
-                # Return chart data
+            if parsed_query.chart_type and parsed_query.chart_type != 'table':
+                # Return chart data (pie, bar, line, mixed)
                 chart_config = self._prepare_chart_data(data, parsed_query.chart_type)
                 return AnalyticsResult(
                     type="chart",
@@ -451,10 +458,11 @@ class AnalyticsAgent(BaseAgent):
                     metadata={"row_count": len(data)}
                 )
             else:
-                # Return table
+                # Return table (including when chart_type='table')
+                table_data = self._prepare_table_data(data)
                 return AnalyticsResult(
                     type="table",
-                    content=data,
+                    content=table_data,
                     sql_query=sql,
                     metadata={"row_count": len(data)}
                 )
@@ -508,3 +516,60 @@ class AnalyticsAgent(BaseAgent):
     def process_message(self, user_message: str, user_role: Optional[str] = None) -> str:
         """Alias for answer_question"""
         return self.answer_question(user_message, user_role)
+
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern for SQL execution protection
+
+    Prevents cascading failures by stopping requests when error rate is too high.
+    States: closed (normal), open (blocking), half_open (testing recovery)
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
+        """
+        Initialize circuit breaker
+
+        Args:
+            failure_threshold: Number of failures before opening circuit
+            recovery_timeout: Seconds to wait before attempting recovery
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = 'closed'  # closed, open, half_open
+
+    def is_open(self) -> bool:
+        """
+        Check if circuit is open (blocking requests)
+
+        Returns:
+            True if circuit is open
+        """
+        if self.state == 'open':
+            # Try to recover after timeout
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                logger.info("Circuit breaker: transitioning to HALF-OPEN")
+                self.state = 'half_open'
+                return False
+            return True
+        return False
+
+    def record_success(self):
+        """Record successful execution - reset failure count"""
+        if self.state == 'half_open':
+            logger.info("Circuit breaker: CLOSED (recovered)")
+        self.state = 'closed'
+        self.failure_count = 0
+
+    def record_failure(self):
+        """Record failed execution - increment failure count"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+
+        if self.failure_count >= self.failure_threshold:
+            logger.error(
+                f"Circuit breaker: OPEN (threshold reached: {self.failure_count})"
+            )
+            self.state = 'open'
