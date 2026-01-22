@@ -25,7 +25,7 @@ class FilterOptions(BaseModel):
 
 class AnalyticsQuery(BaseModel):
     """Structured analytics query"""
-    intent: Literal["report", "chart", "statistics", "sql_query", "comparison"] = Field(
+    intent: Literal["report", "chart", "statistics", "sql_query", "comparison", "complex_join"] = Field(
         description="Type of analytics operation"
     )
     entities: List[str] = Field(
@@ -47,6 +47,10 @@ class AnalyticsQuery(BaseModel):
     chart_type: Optional[Literal["bar", "line", "pie", "table", "mixed"]] = Field(
         None,
         description="Type of visualization"
+    )
+    personalized: bool = Field(
+        default=False,
+        description="Whether query is personalized (e.g., 'my projects', 'my tasks')"
     )
 
 

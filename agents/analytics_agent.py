@@ -112,17 +112,71 @@ class AnalyticsAgent(BaseAgent):
 Роль пользователя: {user_role or 'guest'}
 
 Определи:
-1. intent: тип операции (report, chart, statistics, sql_query, comparison)
-2. entities: какие сущности затрагивает запрос (projects, users, stages, objects)
-3. metrics: какие метрики нужны (count, sum, avg, progress, status_distribution)
-4. filters: какие фильтры применить (date_range, status, department, responsible)
+1. intent: тип операции (report, chart, statistics, sql_query, comparison, complex_join)
+   - complex_join: если запрос требует данные из НЕСКОЛЬКИХ таблиц (например: "объекты с менеджерами и бюджетом", "проекты с сотрудниками")
+   - report: если запрос для ОДНОЙ таблицы (например: "список проектов", "мои этапы")
+2. entities: какие сущности затрагивает запрос (projects, stages, objects, sections, tasks, profiles, view_employee_workloads, v_budgets_full, view_project_dashboard)
+   - Для complex_join: укажи ВСЕ нужные таблицы в порядке приоритета (главная таблица первой)
+3. metrics: какие метрики нужны (count, sum, avg, progress, status_distribution, loading_rate, budget, spent, hours, first_name, last_name, email)
+4. filters: какие фильтры применить (date_range, status, department, responsible, entity_type)
 5. aggregation: группировка (daily, weekly, monthly, by_user, by_project)
 6. chart_type: тип визуализации (bar, line, pie, table, mixed)
+7. personalized: персонализированный запрос (true если есть слова "мой/моя/мои/мне", иначе false)
+
+КРИТИЧНЫЕ ПРАВИЛА ДЛЯ ВЫБОРА ENTITY (читай ВНИМАТЕЛЬНО слова в запросе):
+- Проект/проекты/проектов → projects
+- Этап/этапы/этапов/стадия/стадии → stages
+- Объект/объекты/объектов → objects
+- Раздел/разделы/разделов/секция → sections
+- Задача/задачи/задач/таск → tasks
+- Сотрудник/сотрудники/пользователь/юзер/человек → profiles
+- Загрузка/занятость/перегружен/кто загружен → view_employee_workloads
+- Бюджет/финансы/деньги/потрачено/остаток/расход → v_budgets_full
+- Часы/план часов/факт часов/трудозатраты → view_project_dashboard
+
+ВАЖНО: Если в запросе явно написано "этапы" или "стадии" - НЕ ВЫБИРАЙ projects! Выбирай stages!
+ВАЖНО: Если в запросе явно написано "объекты" - НЕ ВЫБИРАЙ projects! Выбирай objects!
+ВАЖНО: Если в запросе явно написано "разделы" - НЕ ВЫБИРАЙ projects! Выбирай sections!
+
+КРИТИЧНО: Для entities используй ТОЛЬКО то, что ЯВНО указано в запросе!
+- "Активные проекты с менеджерами" → entities=["projects", "profiles"] (НЕ добавляй v_budgets_full!)
+- "Проекты с бюджетом" → entities=["projects", "v_budgets_full"] (НЕ добавляй profiles!)
+- "Активные проекты" → entities=["projects"], filters={{"status": "active"}} (НЕ добавляй profiles или budgets!)
+- "Проекты" → entities=["projects"] (ТОЛЬКО проекты, без дополнительных таблиц!)
 
 Примеры:
-- "Покажи количество проектов по статусам" → intent=chart, entities=[projects], metrics=[count], chart_type=pie
-- "Статистика завершенных объектов за последний месяц" → intent=statistics, entities=[objects], filters={{status: completed, date_range: last_month}}
-- "Сравни прогресс проектов" → intent=comparison, entities=[projects], metrics=[progress]
+- "Покажи количество проектов по статусам" → entities=["projects"]
+- "Мои проекты" → entities=["projects"], personalized=true
+- "Покажи этапы" → entities=["stages"]
+- "Статус всех этапов" → entities=["stages"]
+- "Список объектов" → entities=["objects"]
+- "Мои объекты" → entities=["objects"], personalized=true
+- "Разделы проекта" → entities=["sections"]
+- "Задачи сотрудников" → entities=["tasks"]
+- "Кто перегружен?" → entities=["view_employee_workloads"]
+- "Бюджет проектов" → entities=["v_budgets_full"], filters={{"entity_type": "project"}}
+- "Топ 5 проектов по бюджету" → entities=["v_budgets_full"], chart_type="bar"
+- "Сколько потрачено денег" → entities=["v_budgets_full"], metrics=["spent"]
+- "Остаток бюджета" → entities=["v_budgets_full"], metrics=["remaining"]
+- "Часы по проектам" → entities=["view_project_dashboard"]
+
+ПРИМЕРЫ ОДНОЙ ТАБЛИЦЫ (intent=report):
+- "Активные проекты" → intent="report", entities=["projects"], filters={{"status": "active"}}
+- "Активные проекты с менеджерами" → intent="complex_join", entities=["projects", "profiles"]
+- "Все проекты" → intent="report", entities=["projects"]
+- "Список этапов" → intent="report", entities=["stages"]
+- "Мои объекты" → intent="report", entities=["objects"], personalized=true
+
+ПРИМЕРЫ COMPLEX_JOIN (ТОЛЬКО если явно указаны несколько сущностей):
+- "Объекты с именами менеджеров" → intent="complex_join", entities=["objects", "profiles"]
+- "Проекты с бюджетом" → intent="complex_join", entities=["projects", "v_budgets_full"]
+- "Проекты с бюджетом и менеджерами" → intent="complex_join", entities=["projects", "v_budgets_full", "profiles"]
+- "Задачи с информацией о сотрудниках" → intent="complex_join", entities=["tasks", "profiles"]
+- "Этапы проектов с менеджерами" → intent="complex_join", entities=["stages", "projects", "profiles"]
+
+НЕПРАВИЛЬНЫЕ примеры (НЕ делай так):
+- "Активные проекты с менеджерами" → ❌ entities=["projects", "profiles", "v_budgets_full"] (НЕ добавляй бюджет!)
+- "Проекты" → ❌ entities=["projects", "profiles"] (НЕ добавляй profiles если не упомянуты!)
 """
 
         try:
@@ -131,10 +185,35 @@ class AnalyticsAgent(BaseAgent):
             return parsed
         except Exception as e:
             logger.error(f"Error parsing query: {e}")
-            # Fallback to simple query
+            # Fallback: try to guess entity from query text
+            query_lower = query.lower()
+            entity = "projects"  # default
+
+            # Check for keywords in order of specificity
+            if any(word in query_lower for word in ['загрузк', 'занятост', 'перегруж']):
+                entity = "view_employee_workloads"
+            elif any(word in query_lower for word in ['бюджет', 'финанс', 'деньги', 'потрач', 'остаток', 'расход']):
+                entity = "v_budgets_full"
+            elif any(word in query_lower for word in ['час', 'трудозатрат']):
+                entity = "view_project_dashboard"
+            elif any(word in query_lower for word in ['этап', 'стади']):
+                entity = "stages"
+            elif any(word in query_lower for word in ['объект']):
+                entity = "objects"
+            elif any(word in query_lower for word in ['раздел', 'секци']):
+                entity = "sections"
+            elif any(word in query_lower for word in ['задач', 'таск']):
+                entity = "tasks"
+            elif any(word in query_lower for word in ['сотрудник', 'пользовател', 'юзер', 'человек']):
+                entity = "profiles"
+            elif any(word in query_lower for word in ['проект']):
+                entity = "projects"
+
+            logger.warning(f"Fallback entity selection: {entity}")
+
             return AnalyticsQuery(
                 intent="report",
-                entities=["projects"],
+                entities=[entity],
                 metrics=["count"]
             )
 
@@ -310,6 +389,76 @@ class AnalyticsAgent(BaseAgent):
             for row in data
         ]
 
+    def _generate_empty_message(self, user_query: str, entity: str, personalized: bool) -> str:
+        """
+        Generate context-aware message when no data found
+
+        Args:
+            user_query: Original query
+            entity: Entity type (projects, tasks, etc.)
+            personalized: Whether query was personalized
+
+        Returns:
+            User-friendly message explaining why no data
+        """
+        entity_names = {
+            'projects': 'проектов',
+            'stages': 'этапов',
+            'objects': 'объектов',
+            'sections': 'разделов',
+            'tasks': 'задач',
+            'profiles': 'сотрудников',
+            'view_employee_workloads': 'данных о загрузке',
+            'v_budgets_full': 'данных о бюджете',
+            'view_project_dashboard': 'данных о часах',
+            'view_planning_analytics_summary': 'аналитических данных',
+            'view_my_work_analytics': 'данных о вашей работе'
+        }
+
+        entity_name = entity_names.get(entity, 'данных')
+
+        if personalized:
+            if entity == 'projects':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вы не назначены менеджером ни на одном проекте."
+            elif entity == 'tasks':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вам не назначены задачи."
+            elif entity == 'objects':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вы не назначены ответственным ни на одном объекте."
+            elif entity == 'sections':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вы не ответственный ни на одном разделе."
+            elif entity == 'stages':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, нет этапов с объектами, где вы ответственный."
+            else:
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}."
+        else:
+            if entity == 'view_employee_workloads':
+                return f"По запросу '{user_query}' не найдено {entity_name}. Возможно, данные о планировании еще не внесены."
+            else:
+                return f"По запросу '{user_query}' не найдено {entity_name}."
+
+    def _is_data_empty(self, data: List[Dict[str, Any]]) -> bool:
+        """
+        Check if data contains only None values (empty view)
+
+        Args:
+            data: Query results
+
+        Returns:
+            True if all non-id values are None
+        """
+        if not data:
+            return True
+
+        # Check if all values (except IDs) are None
+        for row in data:
+            # Get non-id values
+            values = [v for k, v in row.items() if 'id' not in k.lower() and 'name' not in k.lower()]
+            # If any non-None value exists, data is not empty
+            if any(v is not None for v in values):
+                return False
+
+        return True
+
     def _prepare_table_data(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Prepare table data in frontend-friendly format
@@ -323,10 +472,14 @@ class AnalyticsAgent(BaseAgent):
         if not data:
             return {"columns": [], "rows": []}
 
-        # Extract column names from first row
-        columns = list(data[0].keys())
+        # Extract column names from first row, filter out ID columns
+        all_columns = list(data[0].keys())
+        columns = [
+            col for col in all_columns
+            if not (col.endswith('_id') or col == 'id')
+        ]
 
-        # Convert list of dicts to list of lists
+        # Convert list of dicts to list of lists (only non-ID columns)
         rows = [[row.get(col) for col in columns] for row in data]
 
         return {
@@ -437,8 +590,31 @@ class AnalyticsAgent(BaseAgent):
             # Step 3: Execute SQL with retry
             data = self._execute_sql(sql, user_role or 'guest')
 
+            # Check if data is empty or contains only None values
+            if not data or self._is_data_empty(data):
+                # Generate context-aware empty message
+                entity = parsed_query.entities[0] if parsed_query.entities else 'проекты'
+                empty_message = self._generate_empty_message(user_query, entity, parsed_query.personalized)
+
+                return AnalyticsResult(
+                    type="text",
+                    content=empty_message,
+                    sql_query=sql,
+                    metadata={"row_count": 0, "empty_data": True}
+                )
+
             # Step 4: Determine result type
-            if parsed_query.chart_type and parsed_query.chart_type != 'table':
+            # Special handling for workload queries - return analytics, not table
+            if parsed_query.entities and 'view_employee_workloads' in parsed_query.entities:
+                # Return text analysis with insights
+                summary = self._generate_workload_analysis(data, user_query)
+                return AnalyticsResult(
+                    type="text",
+                    content=summary,
+                    sql_query=sql,
+                    metadata={"row_count": len(data)}
+                )
+            elif parsed_query.chart_type and parsed_query.chart_type != 'table':
                 # Return chart data (pie, bar, line, mixed)
                 chart_config = self._prepare_chart_data(data, parsed_query.chart_type)
                 return AnalyticsResult(
@@ -474,6 +650,65 @@ class AnalyticsAgent(BaseAgent):
                 content=f"Произошла ошибка при обработке аналитического запроса: {str(e)}",
                 metadata={"error": str(e)}
             )
+
+    def _generate_workload_analysis(self, data: List[Dict[str, Any]], user_query: str) -> str:
+        """
+        Generate workload analysis with insights
+
+        Args:
+            data: Workload data from view_employee_workloads
+            user_query: Original user query
+
+        Returns:
+            Analytical text summary in Russian
+        """
+        if not data:
+            return "Данных о загрузке сотрудников не найдено."
+
+        # Filter out rows with None loading_rate
+        workload_data = [row for row in data if row.get('loading_rate') is not None]
+
+        if not workload_data:
+            return "В данный момент нет активной загрузки у сотрудников. Возможно, данные о планировании еще не внесены."
+
+        # Analyze workload
+        loading_rates = [row['loading_rate'] for row in workload_data]
+        avg_load = sum(loading_rates) / len(loading_rates)
+
+        overloaded = [row for row in workload_data if row['loading_rate'] > 100]
+        high_load = [row for row in workload_data if 80 <= row['loading_rate'] <= 100]
+        normal_load = [row for row in workload_data if 50 <= row['loading_rate'] < 80]
+        low_load = [row for row in workload_data if row['loading_rate'] < 50]
+
+        # Build analysis
+        analysis = f"📊 **Анализ загрузки сотрудников**\n\n"
+        analysis += f"Всего сотрудников с активной загрузкой: {len(workload_data)}\n"
+        analysis += f"Средняя загрузка: {avg_load:.1f}%\n\n"
+
+        if overloaded:
+            analysis += f"⚠️ **Перегружены ({len(overloaded)} чел.):**\n"
+            for row in overloaded[:5]:  # Top 5
+                analysis += f"- {row['full_name']}: {row['loading_rate']}% ({row.get('project_name', 'N/A')})\n"
+            if len(overloaded) > 5:
+                analysis += f"... и еще {len(overloaded) - 5} человек\n"
+            analysis += "\n"
+
+        if high_load:
+            analysis += f"🔶 **Высокая загрузка ({len(high_load)} чел.):** 80-100%\n\n"
+
+        if normal_load:
+            analysis += f"✅ **Нормальная загрузка ({len(normal_load)} чел.):** 50-80%\n\n"
+
+        if low_load:
+            analysis += f"📉 **Низкая загрузка ({len(low_load)} чел.):** <50%\n\n"
+
+        # Recommendations
+        if overloaded:
+            analysis += "💡 **Рекомендации:**\n"
+            analysis += "- Перераспределить задачи перегруженных сотрудников\n"
+            analysis += "- Привлечь дополнительные ресурсы к проектам\n"
+
+        return analysis
 
     def _generate_summary(self, data: List[Dict[str, Any]], query: AnalyticsQuery) -> str:
         """Generate text summary from data"""
