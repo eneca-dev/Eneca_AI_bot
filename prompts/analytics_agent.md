@@ -191,6 +191,22 @@ ORDER BY b.total_amount DESC
 LIMIT 10
 ```
 
+### 3a. Проекты с перерасходом (ranking)
+```sql
+SELECT
+  p.project_name,
+  SUM(b.total_spent - b.total_amount) as overrun,
+  SUM(b.total_spent) as total_spent,
+  SUM(b.total_amount) as total_budget
+FROM projects p
+INNER JOIN v_budgets_full b ON b.entity_id = p.project_id
+WHERE b.entity_type = 'project'
+GROUP BY p.project_id, p.project_name
+HAVING SUM(b.total_spent - b.total_amount) > 0
+ORDER BY overrun DESC
+LIMIT 5
+```
+
 ### 4. Загрузка сотрудника (personalized)
 ```sql
 SELECT

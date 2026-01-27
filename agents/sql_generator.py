@@ -339,6 +339,8 @@ class SQLGenerator:
             return self.generate_statistics_sql(parsed_query, user_role, user_id)
         elif parsed_query.intent == "comparison":
             return self.generate_comparison_sql(parsed_query, user_role, user_id)
+        elif parsed_query.intent == "ranking":
+            return self.generate_ranking_sql(parsed_query, user_role, user_id)
         else:
             return self.generate_generic_sql(parsed_query, user_role, user_id)
 
@@ -370,13 +372,34 @@ class SQLGenerator:
         primary_alias = primary_schema['alias']
         primary_table = primary_schema['table']
 
-        # Build SELECT clause with columns from all entities
+        # Build SELECT clause based on requested_columns
         select_columns = []
 
-        # Add primary entity columns
-        for col in primary_schema['columns']:
-            if not (col.endswith('_id') or col == 'id'):  # Skip IDs
-                select_columns.append(f"{primary_alias}.{col}")
+        if query.requested_columns:
+            # User explicitly requested specific columns
+            for logical_col in query.requested_columns:
+                # Determine which entity this column belongs to
+                if logical_col in ['first_name', 'last_name', 'email']:
+                    # Profile columns
+                    if 'profiles' in query.entities:
+                        related_alias = self.SCHEMA['profiles']['alias']
+                        select_columns.append(f"{related_alias}.{logical_col}")
+                elif logical_col in ['total_amount', 'spent', 'remaining', 'total_spent', 'remaining_amount']:
+                    # Budget columns
+                    if 'v_budgets_full' in query.entities:
+                        budget_alias = self.SCHEMA['v_budgets_full']['alias']
+                        # Map logical names to actual column names
+                        col_map = {'spent': 'total_spent', 'remaining': 'remaining_amount'}
+                        actual_col = col_map.get(logical_col, logical_col)
+                        select_columns.append(f"{budget_alias}.{actual_col}")
+                else:
+                    # Primary entity columns
+                    actual_col = self._get_column_name(primary_entity, logical_col)
+                    select_columns.append(f"{primary_alias}.{actual_col}")
+        else:
+            # Auto-select: only name column by default
+            name_col = self._get_column_name(primary_entity, 'name')
+            select_columns.append(f"{primary_alias}.{name_col}")
 
         # Build JOINs and add columns from related entities
         joins = []
@@ -395,13 +418,18 @@ class SQLGenerator:
             )
 
             if join_condition:
-                joins.append(f"LEFT JOIN {related_table} {related_alias} ON {join_condition}")
+                # Choose JOIN type based on flags
+                if query.exclude_related:
+                    # LEFT JOIN for "without" queries (will filter NULL later)
+                    join_type = "LEFT JOIN"
+                elif query.require_all_entities:
+                    # INNER JOIN for "with" queries
+                    join_type = "INNER JOIN"
+                else:
+                    # LEFT JOIN for "and their" queries
+                    join_type = "LEFT JOIN"
 
-                # Add related entity columns (exclude IDs)
-                for col in related_schema['columns']:
-                    if not (col.endswith('_id') or col == 'id'):
-                        # Add prefix to avoid column name conflicts
-                        select_columns.append(f"{related_alias}.{col} as {related_entity}_{col}")
+                joins.append(f"{join_type} {related_table} {related_alias} ON {join_condition}")
 
         # Build SQL
         select_clause = ",\n    ".join(select_columns) if select_columns else f"{primary_alias}.*"
@@ -420,8 +448,26 @@ FROM {primary_table} {primary_alias}
 
         params = {}
 
-        # Apply filters
-        sql, params = self._apply_filters(sql, params, query.filters, primary_alias, primary_entity)
+        # For exclude_related queries, apply filters to related entity (not primary)
+        if query.exclude_related and len(query.entities) > 1:
+            # Apply filters to RELATED entity (e.g., tasks status, not profiles status)
+            related_entity = query.entities[1]
+            related_schema = self.SCHEMA.get(related_entity)
+            if related_schema:
+                related_alias = related_schema['alias']
+
+                # Apply status/date filters to related entity
+                sql, params = self._apply_filters(sql, params, query.filters, related_alias, related_entity)
+
+                # Add IS NULL check to find entities WITHOUT related records
+                related_id_col = self._get_column_name(related_entity, 'id')
+                sql += f" AND {related_alias}.{related_id_col} IS NULL"
+        else:
+            # Normal query: apply filters on primary entity
+            sql, params = self._apply_filters(sql, params, query.filters, primary_alias, primary_entity)
+
+            # Apply filters on related entities (budget, hours, etc.)
+            sql, params = self._apply_related_filters(sql, params, query.filters, query.entities)
 
         # Apply RBAC
         sql = self._apply_rbac_filter(sql, primary_entity, user_role, user_id, primary_alias)
@@ -517,7 +563,7 @@ FROM {primary_table} {primary_alias}
         user_role: str,
         user_id: Optional[str]
     ) -> Tuple[str, Dict]:
-        """Generate SQL for chart visualization (pie, bar, line)"""
+        """Generate SQL for chart visualization (pie, bar, line, area, radar, radialBar)"""
 
         entity = query.entities[0] if query.entities else 'projects'
         schema = self.SCHEMA.get(entity, self.SCHEMA['projects'])
@@ -525,7 +571,60 @@ FROM {primary_table} {primary_alias}
         alias = schema['alias']
         table = schema['table']
         group_col = schema['group_by_column']
+        name_col = self._get_column_name(entity, 'name')
 
+        params = {}
+
+        # Special handling for radialBar (progress/ratings)
+        if query.chart_type == 'radialBar':
+            # For radialBar we need individual items with progress values
+            if 'progress' in query.metrics or entity in ['stages', 'objects', 'sections']:
+                progress_col = self._get_column_name(entity, 'progress') if 'progress' in schema.get('columns', []) else None
+
+                if progress_col:
+                    sql = f"""
+SELECT
+    {alias}.{name_col} as label,
+    COALESCE({alias}.{progress_col}, 0) as value
+FROM {table} {alias}
+WHERE 1=1
+"""
+                else:
+                    # For entities without progress column, calculate completion rate based on status
+                    status_col = self._get_column_name(entity, 'status')
+                    sql = f"""
+SELECT
+    {alias}.{name_col} || ' (' || {alias}.{status_col} || ')' as label,
+    CASE WHEN {alias}.{status_col} = 'completed' THEN 100
+         WHEN {alias}.{status_col} = 'active' THEN 50
+         ELSE 0 END as value,
+    {alias}.{status_col} as status
+FROM {table} {alias}
+WHERE 1=1
+"""
+                # Apply filters and RBAC
+                sql, params = self._apply_filters(sql, params, query.filters, alias, entity)
+                sql = self._apply_rbac_filter(sql, entity, user_role, user_id, alias)
+                sql += f"\nORDER BY value DESC"
+                sql += f"\nLIMIT 10"
+                return sql, params
+
+        # Special handling for radar (multi-dimensional comparison)
+        if query.chart_type == 'radar':
+            sql = f"""
+SELECT
+    {alias}.{name_col} as label,
+    COALESCE(AVG({alias}.{self._get_column_name(entity, 'progress') if 'progress' in schema.get('columns', []) else 'NULL'}), 0) as value
+FROM {table} {alias}
+WHERE 1=1
+"""
+            sql, params = self._apply_filters(sql, params, query.filters, alias, entity)
+            sql = self._apply_rbac_filter(sql, entity, user_role, user_id, alias)
+            sql += f"\nGROUP BY {alias}.{name_col}"
+            sql += f"\nLIMIT 10"
+            return sql, params
+
+        # Default: pie, bar, line, area - group by column and count
         sql = f"""
 SELECT
     {alias}.{group_col} as label,
@@ -533,8 +632,6 @@ SELECT
 FROM {table} {alias}
 WHERE 1=1
 """
-
-        params = {}
 
         # Apply user filters
         sql, params = self._apply_filters(sql, params, query.filters, alias, entity)
@@ -563,8 +660,27 @@ WHERE 1=1
         table = schema['table']
         columns = schema['columns']
 
-        # Select main columns
-        select_cols = [f"{alias}.{col}" for col in columns[:7]]  # First 7 columns
+        # Build SELECT based on requested_columns
+        if query.requested_columns:
+            # User explicitly requested specific columns
+            select_cols = []
+            for logical_col in query.requested_columns:
+                actual_col = self._get_column_name(entity, logical_col)
+                # Skip UUID/ID columns
+                if (actual_col.endswith('_id') or actual_col == 'id' or
+                    actual_col.endswith('_responsible') or actual_col.endswith('_manager') or
+                    actual_col == 'responsible' or actual_col == 'manager'):
+                    continue
+                select_cols.append(f"{alias}.{actual_col}")
+
+            # If no valid columns after filtering, default to name
+            if not select_cols:
+                name_col = self._get_column_name(entity, 'name')
+                select_cols.append(f"{alias}.{name_col}")
+        else:
+            # Default: only name column
+            name_col = self._get_column_name(entity, 'name')
+            select_cols = [f"{alias}.{name_col}"]
 
         sql = f"""
 SELECT
@@ -685,6 +801,169 @@ WHERE 1=1
 
         return sql, params
 
+    def generate_ranking_sql(
+        self,
+        query: AnalyticsQuery,
+        user_role: str,
+        user_id: Optional[str]
+    ) -> Tuple[str, Dict]:
+        """
+        Generate SQL for TOP N ranking queries with GROUP BY and aggregation.
+
+        Examples:
+        - "Топ 3 менеджера по количеству активных проектов"
+        - "Какие 5 сотрудников имеют больше всего задач"
+        - "Топ проекты по бюджету"
+        """
+        params = {}
+
+        # Determine what we're ranking and what we're counting
+        # Primary entity is what we count/show, related entity is for metrics
+        primary_entity = query.entities[0] if query.entities else 'projects'
+
+        # If there's a second entity (like v_budgets_full), use it for JOIN
+        related_entity = None
+        if len(query.entities) > 1:
+            related_entity = query.entities[1]
+
+        # Group entity is what we group by (for employee rankings)
+        group_entity = query.group_by_entity or primary_entity
+
+        primary_schema = self.SCHEMA.get(primary_entity, self.SCHEMA['projects'])
+        group_schema = self.SCHEMA.get(group_entity, self.SCHEMA['profiles'])
+
+        primary_alias = primary_schema['alias']
+        primary_table = primary_schema['table']
+
+        # If grouping by same entity as primary, no separate group table
+        if group_entity == primary_entity:
+            group_alias = primary_alias
+            group_table = primary_table
+        else:
+            group_alias = group_schema['alias']
+            group_table = group_schema['table']
+
+        # Find the join condition
+        if group_entity != primary_entity:
+            join_condition = self._find_join_condition(
+                primary_entity, primary_alias,
+                group_entity, group_alias
+            )
+
+            if not join_condition:
+                # Try reverse direction
+                join_condition = self._find_join_condition(
+                    group_entity, group_alias,
+                    primary_entity, primary_alias
+                )
+
+            if not join_condition:
+                logger.warning(f"No join condition found between {primary_entity} and {group_entity}")
+                return self.generate_report_sql(query, user_role, user_id)
+        else:
+            # Same entity - no join needed
+            join_condition = None
+
+        # Determine metric to order by
+        order_metric = query.order_by or 'count'
+
+        # Build SELECT based on group entity (what we show) and metric
+        if group_entity == 'profiles':
+            select_cols = [
+                f"{group_alias}.first_name",
+                f"{group_alias}.last_name"
+            ]
+            group_by_cols = [
+                f"{group_alias}.user_id",
+                f"{group_alias}.first_name",
+                f"{group_alias}.last_name"
+            ]
+        else:
+            name_col = self._get_column_name(group_entity, 'name')
+            id_col = self._get_column_name(group_entity, 'id')
+            select_cols = [f"{group_alias}.{name_col}"]
+            group_by_cols = [f"{group_alias}.{id_col}", f"{group_alias}.{name_col}"]
+
+        # Add the aggregate column
+        if order_metric == 'count':
+            select_cols.append(f"COUNT({primary_alias}.*) as count")
+        elif order_metric in ['total_amount', 'budget']:
+            select_cols.append(f"SUM(b.total_amount) as total_budget")
+        elif order_metric in ['spent', 'total_spent']:
+            # For overrun/overspent queries, calculate (spent - budget) as overrun
+            select_cols.append(f"SUM(b.total_spent - b.total_amount) as overrun")
+            select_cols.append(f"SUM(b.total_spent) as total_spent")
+            select_cols.append(f"SUM(b.total_amount) as total_budget")
+        elif order_metric == 'hours':
+            select_cols.append(f"SUM(pd.hours_actual_total) as total_hours")
+        else:
+            select_cols.append(f"COUNT({primary_alias}.*) as count")
+
+        # Build the SQL
+        sql = f"""
+SELECT
+    {', '.join(select_cols)}
+FROM {primary_table} {primary_alias}
+"""
+
+        # Add JOIN to related entity if exists (e.g., v_budgets_full)
+        if related_entity:
+            related_schema = self.SCHEMA.get(related_entity)
+            if related_schema:
+                related_alias = related_schema['alias']
+                related_table = related_schema['table']
+
+                # Find join condition to related entity
+                related_join = self._find_join_condition(
+                    primary_entity, primary_alias,
+                    related_entity, related_alias
+                )
+
+                if related_join:
+                    sql += f"INNER JOIN {related_table} {related_alias} ON {related_join}\n"
+
+        # Add JOIN to group entity if different from primary
+        if join_condition:
+            sql += f"INNER JOIN {group_table} {group_alias} ON {join_condition}\n"
+
+        sql += "WHERE 1=1\n"
+
+        # Apply filters on primary entity
+        status_col = self._get_column_name(primary_entity, 'status')
+        if query.filters and query.filters.status:
+            sql += f" AND {primary_alias}.{status_col} = %(status)s"
+            params['status'] = query.filters.status
+
+        # Apply RBAC
+        sql = self._apply_rbac_filter(sql, primary_entity, user_role, user_id, primary_alias)
+
+        # GROUP BY
+        sql += f"\nGROUP BY {', '.join(group_by_cols)}"
+
+        # For overrun queries, filter only projects with negative remaining_amount
+        if order_metric in ['spent', 'total_spent'] and related_entity == 'v_budgets_full':
+            sql += f"\nHAVING SUM(b.total_spent - b.total_amount) > 0"
+
+        # ORDER BY
+        order_direction = query.order_direction or 'desc'
+        if order_metric == 'count':
+            sql += f"\nORDER BY count {order_direction.upper()}"
+        elif order_metric in ['total_amount', 'budget']:
+            sql += f"\nORDER BY total_budget {order_direction.upper()}"
+        elif order_metric in ['spent', 'total_spent']:
+            # Order by overrun amount (spent - budget)
+            sql += f"\nORDER BY overrun {order_direction.upper()}"
+        elif order_metric == 'hours':
+            sql += f"\nORDER BY total_hours {order_direction.upper()}"
+        else:
+            sql += f"\nORDER BY count {order_direction.upper()}"
+
+        # LIMIT
+        limit = query.limit or 10
+        sql += f"\nLIMIT {limit}"
+
+        return sql, params
+
     def generate_generic_sql(
         self,
         query: AnalyticsQuery,
@@ -746,10 +1025,19 @@ WHERE 1=1
         status_col = self._get_column_name(entity, 'status')
         created_col = self._get_column_name(entity, 'created_at')
 
-        # Status filter
+        # Status filter - support multiple statuses separated by comma
         if filters.status:
-            sql += f" AND {alias}.{status_col} = %(status)s"
-            params['status'] = filters.status
+            # Check if multiple statuses (comma-separated)
+            if ',' in filters.status:
+                statuses = [s.strip() for s in filters.status.split(',')]
+                placeholders = ', '.join([f"%(status_{i})s" for i in range(len(statuses))])
+                sql += f" AND {alias}.{status_col} IN ({placeholders})"
+                for i, status in enumerate(statuses):
+                    params[f'status_{i}'] = status
+            else:
+                # Single status
+                sql += f" AND {alias}.{status_col} = %(status)s"
+                params['status'] = filters.status
 
         # Date range filter
         if filters.date_range:
@@ -766,6 +1054,68 @@ WHERE 1=1
             if schema and 'project_id' in schema['columns']:
                 sql += f" AND {alias}.project_id = %(project_id)s"
                 params['project_id'] = filters.project_id
+
+        return sql, params
+
+    def _apply_related_filters(
+        self,
+        sql: str,
+        params: Dict,
+        filters: FilterOptions,
+        entities: List[str]
+    ) -> Tuple[str, Dict]:
+        """
+        Apply filters on related entities (budget, hours, progress, etc.)
+
+        Args:
+            sql: SQL query string
+            params: Query parameters
+            filters: Filter options with numeric filters
+            entities: List of entities in query
+
+        Returns:
+            Tuple of (sql, params) with filters applied
+        """
+        if not filters:
+            return sql, params
+
+        # Budget filters (if v_budgets_full is in entities)
+        if 'v_budgets_full' in entities:
+            if filters.min_budget is not None:
+                sql += f" AND b.total_amount >= %(min_budget)s"
+                params['min_budget'] = filters.min_budget
+
+            if filters.max_budget is not None:
+                sql += f" AND b.total_amount <= %(max_budget)s"
+                params['max_budget'] = filters.max_budget
+
+        # Hours filters (if view_project_dashboard is in entities)
+        if 'view_project_dashboard' in entities:
+            if filters.min_hours is not None:
+                sql += f" AND pd.hours_actual_total >= %(min_hours)s"
+                params['min_hours'] = filters.min_hours
+
+            if filters.max_hours is not None:
+                sql += f" AND pd.hours_actual_total <= %(max_hours)s"
+                params['max_hours'] = filters.max_hours
+
+        # Progress filters (on primary entity if it has progress column)
+        if filters.min_progress is not None:
+            # Try to apply on primary entity (objects, stages, sections have progress)
+            primary_entity = entities[0] if entities else None
+            if primary_entity in ['objects', 'stages', 'sections', 'decomposition_items']:
+                progress_col = self._get_column_name(primary_entity, 'progress')
+                alias = self.SCHEMA.get(primary_entity, {}).get('alias', 'p')
+                sql += f" AND {alias}.{progress_col} >= %(min_progress)s"
+                params['min_progress'] = filters.min_progress
+
+        if filters.max_progress is not None:
+            primary_entity = entities[0] if entities else None
+            if primary_entity in ['objects', 'stages', 'sections', 'decomposition_items']:
+                progress_col = self._get_column_name(primary_entity, 'progress')
+                alias = self.SCHEMA.get(primary_entity, {}).get('alias', 'p')
+                sql += f" AND {alias}.{progress_col} <= %(max_progress)s"
+                params['max_progress'] = filters.max_progress
 
         return sql, params
 

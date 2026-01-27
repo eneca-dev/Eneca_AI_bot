@@ -112,16 +112,55 @@ class AnalyticsAgent(BaseAgent):
 Роль пользователя: {user_role or 'guest'}
 
 Определи:
-1. intent: тип операции (report, chart, statistics, sql_query, comparison, complex_join)
+1. intent: тип операции (report, chart, statistics, sql_query, comparison, complex_join, ranking)
+   - chart: для РАСПРЕДЕЛЕНИЯ, ГРУППИРОВКИ, ДИАГРАММ (например: "распределение проектов по статусам", "сколько проектов в каждом статусе")
+   - statistics: для СТАТИСТИКИ, ПОДСЧЕТА (например: "статистика по проектам", "сколько всего задач")
+   - ranking: ТОП N запросы с группировкой и подсчетом (например: "топ 3 менеджера по проектам", "какие 5 сотрудников ведут больше всего задач")
    - complex_join: если запрос требует данные из НЕСКОЛЬКИХ таблиц (например: "объекты с менеджерами и бюджетом", "проекты с сотрудниками")
    - report: если запрос для ОДНОЙ таблицы (например: "список проектов", "мои этапы")
+
+   ВАЖНО: Если запрос содержит "распределение", "по статусам", "сколько в каждом", "диаграмма", "график" → используй intent="chart"!
 2. entities: какие сущности затрагивает запрос (projects, stages, objects, sections, tasks, profiles, view_employee_workloads, v_budgets_full, view_project_dashboard)
    - Для complex_join: укажи ВСЕ нужные таблицы в порядке приоритета (главная таблица первой)
-3. metrics: какие метрики нужны (count, sum, avg, progress, status_distribution, loading_rate, budget, spent, hours, first_name, last_name, email)
-4. filters: какие фильтры применить (date_range, status, department, responsible, entity_type)
-5. aggregation: группировка (daily, weekly, monthly, by_user, by_project)
-6. chart_type: тип визуализации (bar, line, pie, table, mixed)
-7. personalized: персонализированный запрос (true если есть слова "мой/моя/мои/мне", иначе false)
+3. requested_columns: КАКИЕ ИМЕННО колонки запросил пользователь (логические имена)
+   - "покажи проекты" → ["name"] (только названия)
+   - "проекты с менеджерами" → ["name", "first_name", "last_name"]
+   - "вся информация по проектам" → ["name", "status", "description", "created_at", "updated_at"]
+   - "активные проекты" → ["name", "status"]
+   - "проекты с бюджетом" → ["name", "total_amount", "spent"]
+   - "проекты по датам" или "с датами" → ["name", "created_at"] (ОБЯЗАТЕЛЬНО включай created_at!)
+   - "активные проекты по датам" → ["name", "status", "created_at"]
+   - [] = автоматический выбор минимальных колонок
+
+   ВАЖНО: Если в запросе есть слова "по датам", "с датами", "даты", "когда созданы" - ОБЯЗАТЕЛЬНО добавляй "created_at" в requested_columns!
+4. metrics: какие метрики нужны (count, sum, avg, progress, status_distribution, loading_rate, budget, spent, hours)
+5. filters: какие фильтры применить:
+   - status: статус (active, completed, in_progress)
+   - min_budget/max_budget: для условий "больше 1000", "меньше 5000", "от 1000 до 5000"
+   - min_hours/max_hours: для часов работы
+   - min_progress/max_progress: для процента готовности
+   - date_range: временной диапазон
+6. aggregation: группировка (daily, weekly, monthly, by_user, by_project)
+7. chart_type: тип визуализации:
+   - line: линейный график (тренды во времени, динамика)
+   - bar: столбчатая диаграмма (сравнение категорий)
+   - area: график с областями (объёмные данные, накопление)
+   - pie: круговая диаграмма (доли от целого, распределение)
+   - radar: лепестковая диаграмма (многомерное сравнение показателей)
+   - radialBar: радиальная диаграмма (прогресс, рейтинги, процент выполнения)
+   - table: таблица (детальные данные)
+8. personalized: персонализированный запрос (true если есть слова "мой/моя/мои/мне", иначе false)
+9. require_all_entities: если запрос ТРЕБУЕТ наличия данных из связанных таблиц (true = INNER JOIN, false = LEFT JOIN)
+   - true: когда говорят "С чем-то" ("объекты С именами ответственных", "проекты С бюджетом", "задачи С сотрудниками")
+   - true: когда есть фильтры на связанную таблицу ("бюджет > 1000" означает что бюджет ДОЛЖЕН быть)
+   - false: когда говорят "и их что-то" ("проекты и их бюджеты" - вернуть все проекты, даже без бюджета)
+10. limit: для ТОП N запросов - число N (например: "топ 3" → limit=3, "топ 5" → limit=5, "первые 10" → limit=10)
+11. order_by: по какой метрике сортировать (count, total_amount, spent, hours)
+12. order_direction: направление сортировки (desc для "больше всего", asc для "меньше всего")
+13. group_by_entity: для ranking - по какой сущности группировать (profiles для "менеджеры/сотрудники", projects для "проекты")
+14. exclude_related: если запрос ищет сущности БЕЗ связанных данных (true = LEFT JOIN + WHERE NULL, false = обычное поведение)
+   - true: когда говорят "БЕЗ чего-то", "НЕТ чего-то", "У КОТОРЫХ НЕТ" ("сотрудники без задач", "проекты без бюджета", "объекты у которых нет ответственных")
+   - false: все остальные случаи
 
 КРИТИЧНЫЕ ПРАВИЛА ДЛЯ ВЫБОРА ENTITY (читай ВНИМАТЕЛЬНО слова в запросе):
 - Проект/проекты/проектов → projects
@@ -144,13 +183,15 @@ class AnalyticsAgent(BaseAgent):
 - "Активные проекты" → entities=["projects"], filters={{"status": "active"}} (НЕ добавляй profiles или budgets!)
 - "Проекты" → entities=["projects"] (ТОЛЬКО проекты, без дополнительных таблиц!)
 
-Примеры:
-- "Покажи количество проектов по статусам" → entities=["projects"]
-- "Мои проекты" → entities=["projects"], personalized=true
-- "Покажи этапы" → entities=["stages"]
-- "Статус всех этапов" → entities=["stages"]
-- "Список объектов" → entities=["objects"]
-- "Мои объекты" → entities=["objects"], personalized=true
+Примеры с requested_columns:
+- "Покажи проекты" → entities=["projects"], requested_columns=["name"]
+- "Активные проекты" → entities=["projects"], requested_columns=["name", "status"], filters={{"status": "active"}}
+- "Вся информация по проектам" → entities=["projects"], requested_columns=["name", "status", "description", "created_at", "updated_at"]
+- "Мои проекты" → entities=["projects"], requested_columns=["name"], personalized=true
+- "Покажи этапы" → entities=["stages"], requested_columns=["name"]
+- "Статус всех этапов" → entities=["stages"], requested_columns=["name", "status"]
+- "Список объектов" → entities=["objects"], requested_columns=["name"]
+- "Мои объекты" → entities=["objects"], requested_columns=["name"], personalized=true
 - "Разделы проекта" → entities=["sections"]
 - "Задачи сотрудников" → entities=["tasks"]
 - "Кто перегружен?" → entities=["view_employee_workloads"]
@@ -160,19 +201,50 @@ class AnalyticsAgent(BaseAgent):
 - "Остаток бюджета" → entities=["v_budgets_full"], metrics=["remaining"]
 - "Часы по проектам" → entities=["view_project_dashboard"]
 
+ПРИМЕРЫ CHART/STATISTICS (распределение, статистика, группировка):
+- "Распределение проектов по статусам" → intent="chart", entities=["projects"], chart_type="pie", metrics=["status_distribution"]
+- "Сколько проектов в каждом статусе" → intent="chart", entities=["projects"], chart_type="bar"
+- "Статистика по проектам" → intent="statistics", entities=["projects"], metrics=["count"]
+- "Распределение задач по статусам" → intent="chart", entities=["tasks"], chart_type="pie"
+- "Сколько объектов у каждого ответственного" → intent="chart", entities=["objects"], chart_type="bar"
+- "График загрузки сотрудников" → intent="chart", entities=["view_employee_workloads"], chart_type="bar"
+- "Динамика создания проектов по месяцам" → intent="chart", entities=["projects"], chart_type="line", aggregation="monthly"
+- "Накопительный график бюджета" → intent="chart", entities=["v_budgets_full"], chart_type="area"
+- "Сравнение показателей проекта" → intent="chart", entities=["projects"], chart_type="radar"
+- "Прогресс выполнения проектов" → intent="chart", entities=["projects"], chart_type="radialBar", metrics=["progress"]
+- "Рейтинг сотрудников по загрузке" → intent="chart", entities=["view_employee_workloads"], chart_type="radialBar"
+
 ПРИМЕРЫ ОДНОЙ ТАБЛИЦЫ (intent=report):
-- "Активные проекты" → intent="report", entities=["projects"], filters={{"status": "active"}}
-- "Активные проекты с менеджерами" → intent="complex_join", entities=["projects", "profiles"]
-- "Все проекты" → intent="report", entities=["projects"]
-- "Список этапов" → intent="report", entities=["stages"]
-- "Мои объекты" → intent="report", entities=["objects"], personalized=true
+- "Активные проекты" → intent="report", entities=["projects"], requested_columns=["name", "status"], filters={{"status": "active"}}
+- "Активные проекты по датам" → intent="report", entities=["projects"], requested_columns=["name", "status", "created_at"], filters={{"status": "active"}}
+- "Проекты с датами" → intent="report", entities=["projects"], requested_columns=["name", "created_at"]
+- "Все проекты" → intent="report", entities=["projects"], requested_columns=["name"]
+- "Список этапов" → intent="report", entities=["stages"], requested_columns=["name"]
+- "Мои объекты" → intent="report", entities=["objects"], requested_columns=["name"], personalized=true
+
+ПРИМЕРЫ С ФИЛЬТРАМИ НА СВЯЗАННЫЕ ТАБЛИЦЫ:
+- "Активные проекты с бюджетом больше 1000" → intent="complex_join", entities=["projects", "v_budgets_full"], filters={{"status": "active", "min_budget": 1000}}, require_all_entities=true
+- "Проекты с бюджетом от 1000 до 5000" → intent="complex_join", entities=["projects", "v_budgets_full"], filters={{"min_budget": 1000, "max_budget": 5000}}, require_all_entities=true
+- "Объекты с ответственными где прогресс больше 50%" → intent="complex_join", entities=["objects", "profiles"], filters={{"min_progress": 50}}, require_all_entities=true
+- "Проекты без бюджета" → intent="complex_join", entities=["projects", "v_budgets_full"], exclude_related=true
+- "Сотрудники без задач" → intent="complex_join", entities=["profiles", "tasks"], exclude_related=true
+- "Сотрудники у которых нет активных задач на этой неделе" → intent="complex_join", entities=["profiles", "tasks"], filters={{"status": "active", "date_range": "this_week"}}, exclude_related=true
+- "Объекты без ответственных" → intent="complex_join", entities=["objects", "profiles"], exclude_related=true
 
 ПРИМЕРЫ COMPLEX_JOIN (ТОЛЬКО если явно указаны несколько сущностей):
-- "Объекты с именами менеджеров" → intent="complex_join", entities=["objects", "profiles"]
-- "Проекты с бюджетом" → intent="complex_join", entities=["projects", "v_budgets_full"]
-- "Проекты с бюджетом и менеджерами" → intent="complex_join", entities=["projects", "v_budgets_full", "profiles"]
-- "Задачи с информацией о сотрудниках" → intent="complex_join", entities=["tasks", "profiles"]
-- "Этапы проектов с менеджерами" → intent="complex_join", entities=["stages", "projects", "profiles"]
+- "Объекты С именами ответственных" → intent="complex_join", entities=["objects", "profiles"], requested_columns=["name", "first_name", "last_name"], require_all_entities=true
+- "Активные проекты С менеджерами" → intent="complex_join", entities=["projects", "profiles"], requested_columns=["name", "status", "first_name", "last_name"], filters={{"status": "active"}}, require_all_entities=true
+- "Проекты С бюджетом" → intent="complex_join", entities=["projects", "v_budgets_full"], requested_columns=["name", "total_amount", "spent"], require_all_entities=true
+- "Вся информация по проектам с менеджерами" → intent="complex_join", entities=["projects", "profiles"], requested_columns=["name", "status", "description", "created_at", "first_name", "last_name", "email"], require_all_entities=true
+- "Проекты и их бюджеты" → intent="complex_join", entities=["projects", "v_budgets_full"], requested_columns=["name", "total_amount"], require_all_entities=false
+- "Проекты и их менеджеры" → intent="complex_join", entities=["projects", "profiles"], requested_columns=["name", "first_name", "last_name"], require_all_entities=false
+
+ПРИМЕРЫ RANKING (ТОП N с группировкой):
+- "Какие 3 менеджера ведут больше всего активных проектов?" → intent="ranking", entities=["projects"], group_by_entity="profiles", filters={{"status": "active"}}, limit=3, order_by="count", order_direction="desc"
+- "Топ 5 сотрудников по количеству задач" → intent="ranking", entities=["tasks"], group_by_entity="profiles", limit=5, order_by="count", order_direction="desc"
+- "Кто меньше всего загружен?" → intent="ranking", entities=["tasks"], group_by_entity="profiles", limit=5, order_by="count", order_direction="asc"
+- "Топ 10 проектов по бюджету" → intent="ranking", entities=["projects", "v_budgets_full"], group_by_entity="projects", limit=10, order_by="total_amount", order_direction="desc"
+- "Первые 3 этапа по прогрессу" → intent="ranking", entities=["stages"], group_by_entity="stages", limit=3, order_by="progress", order_direction="desc"
 
 НЕПРАВИЛЬНЫЕ примеры (НЕ делай так):
 - "Активные проекты с менеджерами" → ❌ entities=["projects", "profiles", "v_budgets_full"] (НЕ добавляй бюджет!)
@@ -558,8 +630,89 @@ class AnalyticsAgent(BaseAgent):
                     }
                 }
             }
+        elif chart_type == "area":
+            return {
+                "type": "area",
+                "data": {
+                    "labels": [row.get("date", row.get("label", "")) for row in data],
+                    "datasets": [{
+                        "label": "Объём",
+                        "data": [row.get("value", 0) for row in data],
+                        "borderColor": "#36A2EB",
+                        "backgroundColor": "rgba(54, 162, 235, 0.3)",
+                        "fill": True
+                    }]
+                },
+                "options": {
+                    "responsive": True,
+                    "scales": {
+                        "y": {"beginAtZero": True}
+                    }
+                }
+            }
+        elif chart_type == "radar":
+            return {
+                "type": "radar",
+                "data": {
+                    "labels": [row.get("label", row.get("name", "")) for row in data],
+                    "datasets": [{
+                        "label": "Показатели",
+                        "data": [row.get("value", row.get("progress", 0)) for row in data],
+                        "borderColor": "#36A2EB",
+                        "backgroundColor": "rgba(54, 162, 235, 0.2)"
+                    }]
+                },
+                "options": {
+                    "responsive": True,
+                    "scales": {
+                        "r": {"beginAtZero": True, "max": 100}
+                    }
+                }
+            }
+        elif chart_type == "radialBar":
+            return {
+                "type": "radialBar",
+                "data": {
+                    "labels": [row.get("label", row.get("name", row.get("project_name", ""))) for row in data],
+                    "datasets": [{
+                        "label": "Прогресс",
+                        "data": [row.get("value", row.get("progress", row.get("avg_progress", 0))) for row in data]
+                    }]
+                },
+                "options": {
+                    "responsive": True,
+                    "max": 100
+                }
+            }
         else:
             return {}
+
+    def _get_chart_title(self, query: AnalyticsQuery) -> str:
+        """Generate chart title based on query"""
+        entity_names = {
+            'projects': 'Проекты',
+            'stages': 'Этапы',
+            'objects': 'Объекты',
+            'sections': 'Разделы',
+            'tasks': 'Задачи',
+            'profiles': 'Сотрудники',
+            'view_employee_workloads': 'Загрузка сотрудников',
+            'v_budgets_full': 'Бюджеты'
+        }
+
+        entity = query.entities[0] if query.entities else 'projects'
+        entity_name = entity_names.get(entity, entity)
+
+        if query.chart_type == 'radialBar':
+            return f"Прогресс: {entity_name}"
+        elif query.chart_type == 'pie':
+            return f"Распределение: {entity_name}"
+        elif query.chart_type == 'bar':
+            return f"Сравнение: {entity_name}"
+        elif query.chart_type == 'line':
+            return f"Динамика: {entity_name}"
+        else:
+            return entity_name
 
     def process_analytics(
         self,
@@ -615,13 +768,27 @@ class AnalyticsAgent(BaseAgent):
                     metadata={"row_count": len(data)}
                 )
             elif parsed_query.chart_type and parsed_query.chart_type != 'table':
-                # Return chart data (pie, bar, line, mixed)
-                chart_config = self._prepare_chart_data(data, parsed_query.chart_type)
+                # Return chart data (pie, bar, line, area, radar, radialBar)
+                logger.info(f"Chart data (first 3): {json.dumps(data[:3] if data else [], ensure_ascii=False, default=str)}")
+
+                # Determine data keys for frontend
+                x_key = "label" if data and "label" in data[0] else "name"
+                y_keys = ["value"] if data and "value" in data[0] else ["count"]
+
+                # Format content as expected by frontend ChartWidget
+                chart_content = {
+                    "chartType": parsed_query.chart_type,
+                    "data": data,
+                    "xKey": x_key,
+                    "yKeys": y_keys,
+                    "title": self._get_chart_title(parsed_query),
+                    "valueSuffix": "%" if parsed_query.chart_type == "radialBar" else ""
+                }
+
                 return AnalyticsResult(
                     type="chart",
-                    content=data,
+                    content=chart_content,
                     sql_query=sql,
-                    chart_config=chart_config,
                     metadata={"row_count": len(data)}
                 )
             elif parsed_query.intent == "statistics":
