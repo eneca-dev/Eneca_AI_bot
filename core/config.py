@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     supabase_chat_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_KEY")  # ANON_KEY for Realtime subscriptions
     supabase_chat_service_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_SERVICE_KEY")  # Bypasses RLS for bot writes
 
+    # Microsoft Bot Framework Configuration
+    microsoft_app_id: Optional[str] = Field(None, alias="MICROSOFT_APP_ID")
+    microsoft_app_password: Optional[str] = Field(None, alias="MICROSOFT_APP_PASSWORD")
+    tenant_id: Optional[str] = Field(None, alias="TENANT_ID")
+
+    # Recall AI Configuration
+    recall_api_key: Optional[str] = Field(None, alias="RECALL_API_KEY")
+    recall_bot_name: str = Field("EnecaProtocolMeetBot", alias="RECALL_BOT_NAME")
+
     # MCP Server Configuration
     mcp_server_url: str = Field(..., alias="MCP_SERVER_URL")
 

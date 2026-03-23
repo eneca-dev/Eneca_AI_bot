@@ -58,6 +58,10 @@ agents:
   # Access via direct endpoint: POST /api/analytics
   # See docs/ANALYTICS_AGENT.md for details
 
+  # NOTE: Teams Agent is a STANDALONE service (not part of orchestrator)
+  # Access via direct endpoint: POST /api/teams/process-meeting
+  # Processes meeting transcripts and generates structured Notion-style reports
+
   # Web Search Agent - поиск в интернете (пример)
   # - name: web_search
   #   class_path: agents.web_search.WebSearchAgent

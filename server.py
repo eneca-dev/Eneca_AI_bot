@@ -3,15 +3,24 @@ from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from pathlib import Path
 from typing import Optional, Dict, Any, AsyncIterator
 from agents.orchestrator import OrchestratorAgent
 from agents.analytics_agent import AnalyticsAgent, AnalyticsResult
+from agents.teams_agent import (
+    TeamsAgent, MeetingTranscript, MeetingReport,
+    MeetingParticipant, TranscriptSegment,
+)
+from services.teams_sender import teams_sender, format_report_as_text
+from services.recall_client import recall_client
+from services.whisper_transcriber import whisper_transcriber
 from core.config import settings
 from loguru import logger
 import uuid
 import uvicorn
 import json
 import asyncio
+import re
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -32,6 +41,7 @@ app.add_middleware(
 # Initialize agents (singletons)
 agent = None
 analytics_agent = None
+teams_agent = None
 
 def get_agent() -> OrchestratorAgent:
     """Get or create orchestrator agent instance"""
@@ -51,6 +61,16 @@ def get_analytics_agent() -> AnalyticsAgent:
         analytics_agent = AnalyticsAgent()
         logger.info("AnalyticsAgent initialized successfully")
     return analytics_agent
+
+
+def get_teams_agent() -> TeamsAgent:
+    """Get or create teams agent instance"""
+    global teams_agent
+    if teams_agent is None:
+        logger.info("Initializing TeamsAgent...")
+        teams_agent = TeamsAgent()
+        logger.info("TeamsAgent initialized successfully")
+    return teams_agent
 
 
 async def verify_api_key(x_api_key: str = Header(None, alias=settings.api_key_header)):
@@ -119,6 +139,57 @@ class AnalyticsResponse(BaseModel):
     metadata: Dict[str, Any] = {}
     success: bool = True
     error: Optional[str] = None
+
+
+class TeamsProcessRequest(BaseModel):
+    """Teams meeting processing request"""
+    meeting: MeetingTranscript
+    user_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    send_to_teams: bool = True
+    teams_conversation_id: Optional[str] = None
+
+
+class TeamsProcessResponse(BaseModel):
+    """Teams meeting processing response"""
+    report: Optional[MeetingReport] = None
+    success: bool = True
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+
+
+# --- Meeting link detection ---
+
+MEETING_URL_PATTERNS = [
+    # Teams meeting links
+    re.compile(r'https?://teams\.microsoft\.com/l/meetup-join/[^\s<>"]+', re.IGNORECASE),
+    re.compile(r'https?://teams\.microsoft\.com/meet/[^\s<>"]+', re.IGNORECASE),
+    re.compile(r'https?://teams\.live\.com/meet/[^\s<>"]+', re.IGNORECASE),
+    # Zoom meeting links
+    re.compile(r'https?://[\w.-]*zoom\.us/[jw]/[^\s<>"]+', re.IGNORECASE),
+    # Google Meet links
+    re.compile(r'https?://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}[^\s<>"]*', re.IGNORECASE),
+]
+
+
+def extract_meeting_url(text: str) -> Optional[str]:
+    """
+    Extract a meeting URL from message text.
+    Teams may send links wrapped in HTML <a href="..."> tags.
+    Returns the first matching meeting link or None.
+    """
+    if not text:
+        return None
+
+    # Also extract URLs from HTML href attributes (Teams wraps links in <a> tags)
+    href_urls = re.findall(r'href=["\']([^"\']+)["\']', text)
+    search_text = text + " " + " ".join(href_urls)
+
+    for pattern in MEETING_URL_PATTERNS:
+        match = pattern.search(search_text)
+        if match:
+            return match.group(0).rstrip('.,;:!?)')
+    return None
 
 
 @app.on_event("startup")
@@ -425,6 +496,441 @@ async def analytics_endpoint(
             success=False,
             error=str(e)
         )
+
+
+@app.post("/api/teams/process-meeting", response_model=TeamsProcessResponse)
+async def teams_process_meeting(
+    request: TeamsProcessRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Process a Teams meeting transcript and generate a structured Notion-style report.
+
+    Headers (if API_KEY is configured in .env):
+        X-API-Key: your_api_key
+
+    Expected payload:
+    {
+        "meeting": {
+            "title": "Meeting title",
+            "date": "2026-03-10",
+            "duration": "1h 30m",
+            "participants": [{"name": "...", "role": "..."}],
+            "transcript": [{"speaker": "...", "timestamp": "00:01:30", "text": "..."}]
+        },
+        "user_id": "optional-user-id",
+        "metadata": {}
+    }
+
+    Returns:
+    {
+        "report": { ... MeetingReport ... },
+        "success": true,
+        "metadata": {"participants_count": 5, "segments_count": 20}
+    }
+    """
+    try:
+        logger.info(f"Received Teams meeting request: title='{request.meeting.title}', "
+                     f"participants={len(request.meeting.participants)}, "
+                     f"segments={len(request.meeting.transcript)}")
+
+        agent_instance = get_teams_agent()
+
+        loop = asyncio.get_event_loop()
+        report = await loop.run_in_executor(
+            None, agent_instance.process_meeting, request.meeting
+        )
+
+        logger.info(f"Meeting report generated: {len(report.action_items)} action items, "
+                     f"{len(report.key_decisions)} decisions")
+
+        # Send report to Teams if configured and requested
+        teams_sent = False
+        if request.send_to_teams and teams_sender.is_configured:
+            try:
+                report_text = format_report_as_text(report)
+
+                if request.teams_conversation_id:
+                    # Send to specific conversation
+                    await teams_sender.send_message(request.teams_conversation_id, report_text)
+                    teams_sent = True
+                    logger.info(f"Report sent to Teams conversation {request.teams_conversation_id}")
+                else:
+                    # Send to all saved conversations
+                    conversations = teams_sender.list_conversations()
+                    if conversations:
+                        results = await teams_sender.send_report_to_all(report_text)
+                        teams_sent = any(r["success"] for r in results)
+                        logger.info(f"Report broadcast to {len(results)} conversations")
+                    else:
+                        logger.warning("No Teams conversations saved. "
+                                       "Someone must write to the bot first.")
+            except Exception as e:
+                logger.error(f"Failed to send report to Teams: {e}")
+
+        return TeamsProcessResponse(
+            report=report,
+            success=True,
+            metadata={
+                "participants_count": len(request.meeting.participants),
+                "segments_count": len(request.meeting.transcript),
+                "teams_sent": teams_sent,
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error processing Teams meeting: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing meeting: {str(e)}"
+        )
+
+
+@app.post("/api/messages")
+async def teams_messages_endpoint(request: Request):
+    """
+    Bot Framework messaging endpoint.
+    Receives activities from Microsoft Teams when users write to the bot.
+    This is the URL you set in Azure Bot → Configuration → Messaging endpoint.
+
+    When a user writes to the bot in Teams:
+    1. Microsoft sends the activity here
+    2. We save the conversation reference (so we can message back later)
+    3. We reply with a greeting
+    """
+    try:
+        activity = await request.json()
+        activity_type = activity.get("type", "")
+
+        logger.info(f"Teams activity received: type={activity_type}, "
+                     f"from={activity.get('from', {}).get('name', 'unknown')}")
+
+        if activity_type == "message":
+            # Save conversation reference for future proactive messages
+            teams_sender.save_conversation_reference(activity)
+
+            user_name = activity.get("from", {}).get("name", "пользователь")
+            text = activity.get("text", "").strip()
+
+            # Check for meeting links
+            meeting_url = extract_meeting_url(text)
+
+            if meeting_url:
+                logger.info(f"Meeting link detected from {user_name}: {meeting_url}")
+
+                # Get conversation ID to send report back to later
+                conversation_id = activity.get("conversation", {}).get("id")
+
+                if recall_client.is_configured:
+                    try:
+                        result = await recall_client.join_meeting(
+                            meeting_url=meeting_url,
+                            teams_conversation_id=conversation_id,
+                        )
+                        recall_bot_id = result.get("id", "unknown")
+                        reply_text = (
+                            "Вижу ссылку на созвон. Отправляю ассистента для записи. "
+                            "По завершении пришлю протокол сюда."
+                        )
+                        logger.info(f"Recall bot {recall_bot_id} sent to {meeting_url}")
+                    except Exception as e:
+                        logger.error(f"Failed to send Recall bot: {e}")
+                        reply_text = f"Не удалось отправить ассистента на встречу: {e}"
+                else:
+                    reply_text = (
+                        "Вижу ссылку на созвон, но Recall AI не настроен (RECALL_API_KEY). "
+                        "Добавьте ключ в .env для автоматической записи."
+                    )
+
+                await teams_sender.reply_to_activity(activity, reply_text)
+
+            else:
+                # Default greeting
+                reply_text = (
+                    f"Привет, {user_name}! Я Eneca Meeting Bot.\n\n"
+                    f"Я сохранил ваш чат — теперь отчёты по встречам будут приходить сюда.\n\n"
+                    f"Отправьте мне ссылку на встречу (Teams, Zoom, Google Meet) — "
+                    f"и я запишу и пришлю протокол."
+                )
+                await teams_sender.reply_to_activity(activity, reply_text)
+
+        elif activity_type == "conversationUpdate":
+            # Bot was added to conversation
+            members_added = activity.get("membersAdded", [])
+            bot_id = activity.get("recipient", {}).get("id")
+            for member in members_added:
+                if member.get("id") != bot_id:
+                    # A user was added, save reference
+                    teams_sender.save_conversation_reference(activity)
+
+        # Return 200 OK (required by Bot Framework)
+        return {"status": "ok"}
+
+    except Exception as e:
+        logger.error(f"Error processing Teams activity: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/teams/conversations")
+async def teams_conversations(api_key: str = Depends(verify_api_key)):
+    """List all saved conversation references (for debugging)"""
+    return {
+        "conversations": teams_sender.list_conversations(),
+        "is_configured": teams_sender.is_configured,
+    }
+
+
+@app.get("/api/teams/test-auth")
+async def teams_test_auth():
+    """Test Microsoft OAuth token acquisition — for debugging"""
+    import httpx
+    tenant = settings.tenant_id or "botframework.com"
+    oauth_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                oauth_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": settings.microsoft_app_id,
+                    "client_secret": settings.microsoft_app_password,
+                    "scope": "https://api.botframework.com/.default",
+                },
+            )
+            return {
+                "app_id": settings.microsoft_app_id,
+                "tenant_id": tenant,
+                "url": oauth_url,
+                "status": response.status_code,
+                "body": response.json(),
+            }
+    except Exception as e:
+        return {"app_id": settings.microsoft_app_id, "error": str(e)}
+
+
+@app.get("/api/recall/webhook")
+async def recall_webhook_health():
+    """Health check for Recall webhook URL validation"""
+    return {"status": "ok"}
+
+
+@app.post("/api/recall/webhook")
+async def recall_webhook(request: Request):
+    """
+    Webhook endpoint for Recall.ai events.
+
+    Register this URL in Recall dashboard:
+        https://your-server.com/api/recall/webhook
+
+    Flow:
+    1. Recall sends bot.status_change event (status: done)
+    2. We fetch the transcript from Recall API
+    3. Convert to MeetingTranscript format
+    4. Process with TeamsAgent
+    5. Send report to the original Teams conversation
+    """
+    try:
+        data = await request.json()
+        event = data.get("event", "")
+
+        # Log full webhook payload for debugging
+        logger.info(f"Recall webhook FULL payload: {json.dumps(data, default=str)}")
+
+        # Recall sends bot_id in data.bot.id
+        bot_id = str(
+            data.get("data", {}).get("bot", {}).get("id", "")
+            or data.get("data", {}).get("bot_id", "")
+            or ""
+        )
+
+        logger.info(f"Recall webhook received: event={event}, bot_id={bot_id}")
+
+        # Handle recording.done — start Whisper transcription
+        if event == "recording.done":
+            if bot_id:
+                logger.info(f"Recording done for bot {bot_id}, starting Whisper transcription")
+                asyncio.create_task(_process_recording_with_whisper(bot_id))
+            else:
+                logger.warning("recording.done without bot_id")
+
+        # Handle transcript.done — ignore (using Whisper)
+        elif event == "transcript.done":
+            logger.info(f"Recall transcript.done for bot {bot_id} (ignored, using Whisper)")
+
+        # Handle bot.done — just log
+        elif event == "bot.done":
+            logger.info(f"Bot {bot_id} done")
+
+        # Handle fatal errors
+        elif event == "bot.status_change":
+            status = data.get("data", {}).get("status", {})
+            code = status.get("code", "")
+            logger.info(f"Recall bot {bot_id} status: {code}")
+
+            if code == "fatal":
+                logger.error(f"Recall bot {bot_id} failed: {status}")
+                conversation_id = recall_client.get_conversation_for_bot(bot_id)
+                if conversation_id:
+                    try:
+                        await teams_sender.send_message(
+                            conversation_id,
+                            f"Ассистент не смог записать встречу. Ошибка: {status.get('message', 'unknown')}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to notify about Recall failure: {e}")
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        logger.error(f"Error processing Recall webhook: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+async def _process_recording_with_whisper(bot_id: str):
+    """
+    Background task: download video from Recall, transcribe with Whisper,
+    enrich with speaker names from Recall speaker_timeline,
+    process with TeamsAgent, send report to Teams.
+    """
+    conversation_id = recall_client.get_conversation_for_bot(bot_id)
+
+    try:
+        logger.info(f"Processing recording for bot {bot_id} via Whisper")
+
+        # Notify user that processing has started
+        if conversation_id and teams_sender.is_configured:
+            await teams_sender.send_message(
+                conversation_id,
+                "Встреча завершена. Обрабатываю запись..."
+            )
+
+        # 1. Download video from Recall
+        video_path = await recall_client.download_video(bot_id)
+        if not video_path:
+            raise ValueError("Failed to download video from Recall")
+
+        # 2. Transcribe with OpenAI Whisper
+        loop = asyncio.get_event_loop()
+        whisper_result = await loop.run_in_executor(
+            None, whisper_transcriber.transcribe, video_path
+        )
+
+        segments = whisper_result.get("segments", [])
+        logger.info(f"Whisper transcription: {len(segments)} segments")
+
+        if not segments:
+            raise ValueError("Whisper returned 0 segments — no speech detected")
+
+        # 3. Get speaker timeline from Recall to map speakers to Whisper segments
+        speaker_timeline = await recall_client.get_speaker_timeline(bot_id)
+
+        def _get_speaker_at(seconds: float) -> str:
+            """Find who was speaking at a given timestamp using Recall speaker_timeline."""
+            if not speaker_timeline:
+                return "Speaker"
+
+            # Exact match — timestamp falls within a speaker interval
+            for entry in speaker_timeline:
+                start = entry.get("start_timestamp", {}).get("relative", 0)
+                end = entry.get("end_timestamp", {}).get("relative", 0)
+                if start <= seconds <= end:
+                    return entry.get("participant", {}).get("name", "Speaker")
+
+            # No exact match — find the nearest speaker by time distance
+            best_name = "Speaker"
+            best_dist = float("inf")
+            for entry in speaker_timeline:
+                start = entry.get("start_timestamp", {}).get("relative", 0)
+                end = entry.get("end_timestamp", {}).get("relative", 0)
+                dist = min(abs(seconds - start), abs(seconds - end))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_name = entry.get("participant", {}).get("name", "Speaker")
+            return best_name
+
+        # Assign speaker names to Whisper segments
+        for seg in segments:
+            ts = seg.get("timestamp", "00:00")
+            parts = ts.split(":")
+            if len(parts) == 3:
+                total_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            elif len(parts) == 2:
+                total_sec = int(parts[0]) * 60 + int(parts[1])
+            else:
+                total_sec = 0
+            seg["speaker"] = _get_speaker_at(total_sec)
+
+        # 4. Get meeting metadata from Recall
+        bot_data = await recall_client.get_bot_status(bot_id)
+
+        meeting_metadata = (
+            bot_data.get("recordings", [{}])[0]
+            .get("media_shortcuts", {})
+            .get("meeting_metadata", {})
+            .get("data", {})
+        )
+        title = meeting_metadata.get("title") or "Meeting Recording"
+        date = bot_data.get("join_at", "")[:10] if bot_data.get("join_at") else ""
+
+        # Collect unique speaker names from segments
+        unique_speakers = list(set(seg["speaker"] for seg in segments))
+        logger.info(f"Speakers detected: {unique_speakers}")
+
+        # Build MeetingTranscript
+        meeting = MeetingTranscript(
+            title=title,
+            date=date,
+            duration=None,
+            participants=[
+                MeetingParticipant(name=name, role=None)
+                for name in unique_speakers
+            ],
+            transcript=[
+                TranscriptSegment(
+                    speaker=seg["speaker"],
+                    timestamp=seg["timestamp"],
+                    text=seg["text"],
+                )
+                for seg in segments
+            ],
+        )
+
+        # 4. Process with TeamsAgent
+        agent_instance = get_teams_agent()
+        report = await loop.run_in_executor(
+            None, agent_instance.process_meeting, meeting
+        )
+
+        logger.info(f"Report generated for bot {bot_id}: "
+                     f"{len(report.action_items)} action items, "
+                     f"{len(report.key_decisions)} decisions")
+
+        # 5. Send report to Teams
+        if conversation_id and teams_sender.is_configured:
+            report_text = format_report_as_text(report)
+            await teams_sender.send_message(conversation_id, report_text)
+            logger.info(f"Report sent to Teams conversation {conversation_id}")
+        else:
+            logger.warning(f"No Teams conversation mapped for bot {bot_id}")
+
+        # 6. Clean up temp video file
+        import os
+        try:
+            os.remove(video_path)
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"Error processing recording for bot {bot_id}: {e}",
+                     exc_info=True)
+        if conversation_id and teams_sender.is_configured:
+            try:
+                await teams_sender.send_message(
+                    conversation_id,
+                    f"Ошибка при обработке записи встречи: {str(e)}"
+                )
+            except Exception:
+                pass
 
 
 @app.post("/api/debug")
