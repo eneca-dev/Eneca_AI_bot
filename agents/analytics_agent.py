@@ -1,74 +1,18 @@
 """Analytics Agent for data analysis, reporting, and visualization"""
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Literal, Union
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Dict, Any, List, Optional
+import json
+import time
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from agents.base import BaseAgent
 from database.supabase_client import supabase_db_client
 from core.config import settings
-from loguru import logger
-import json
+from agents.sql_generator import SQLGenerator
 
-
-class FilterOptions(BaseModel):
-    """Filter options for analytics queries"""
-    model_config = ConfigDict(extra="forbid")
-
-    status: Optional[str] = Field(None, description="Filter by status (active, completed, etc.)")
-    date_range: Optional[str] = Field(None, description="Date range filter (last_week, last_month, etc.)")
-    responsible: Optional[str] = Field(None, description="Filter by responsible person ID")
-    department: Optional[str] = Field(None, description="Filter by department")
-    project_id: Optional[str] = Field(None, description="Filter by specific project ID")
-    start_date: Optional[str] = Field(None, description="Start date for date range (ISO format)")
-    end_date: Optional[str] = Field(None, description="End date for date range (ISO format)")
-
-
-class AnalyticsQuery(BaseModel):
-    """Structured analytics query"""
-    intent: Literal["report", "chart", "statistics", "sql_query", "comparison"] = Field(
-        description="Type of analytics operation"
-    )
-    entities: List[str] = Field(
-        default_factory=list,
-        description="Entities involved (projects, users, stages, etc.)"
-    )
-    metrics: List[str] = Field(
-        default_factory=list,
-        description="Metrics to analyze (count, sum, avg, progress, etc.)"
-    )
-    filters: FilterOptions = Field(
-        default_factory=FilterOptions,
-        description="Filters to apply (date_range, status, responsible, etc.)"
-    )
-    aggregation: Optional[str] = Field(
-        None,
-        description="Aggregation type (daily, weekly, monthly, by_user, by_project)"
-    )
-    chart_type: Optional[Literal["bar", "line", "pie", "table", "mixed"]] = Field(
-        None,
-        description="Type of visualization"
-    )
-
-
-class AnalyticsResult(BaseModel):
-    """Structured analytics result"""
-    type: Literal["text", "table", "chart", "mixed"] = Field(
-        description="Type of result"
-    )
-    content: Union[str, Dict[str, Any], List[Dict[str, Any]]] = Field(
-        description="Result content"
-    )
-    sql_query: Optional[str] = Field(
-        None,
-        description="SQL query used (for transparency)"
-    )
-    chart_config: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Chart.js configuration for frontend"
-    )
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional metadata (row_count, execution_time, etc.)"
-    )
+# Import shared models to avoid circular import
+from agents.analytics_models import FilterOptions, AnalyticsQuery, AnalyticsResult
 
 
 class AnalyticsAgent(BaseAgent):
@@ -99,6 +43,15 @@ class AnalyticsAgent(BaseAgent):
 
         # Configure LLM with structured output
         self.query_llm = self.llm.with_structured_output(AnalyticsQuery)
+
+        # Initialize SQL Generator
+        self.sql_generator = SQLGenerator()
+
+        # Initialize circuit breaker for SQL execution protection
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            recovery_timeout=60
+        )
 
         logger.info(f"AnalyticsAgent initialized with model {model}")
 
@@ -159,17 +112,143 @@ class AnalyticsAgent(BaseAgent):
 Роль пользователя: {user_role or 'guest'}
 
 Определи:
-1. intent: тип операции (report, chart, statistics, sql_query, comparison)
-2. entities: какие сущности затрагивает запрос (projects, users, stages, objects)
-3. metrics: какие метрики нужны (count, sum, avg, progress, status_distribution)
-4. filters: какие фильтры применить (date_range, status, department, responsible)
-5. aggregation: группировка (daily, weekly, monthly, by_user, by_project)
-6. chart_type: тип визуализации (bar, line, pie, table, mixed)
+1. intent: тип операции (report, chart, statistics, sql_query, comparison, complex_join, ranking)
+   - chart: для РАСПРЕДЕЛЕНИЯ, ГРУППИРОВКИ, ДИАГРАММ (например: "распределение проектов по статусам", "сколько проектов в каждом статусе")
+   - statistics: для СТАТИСТИКИ, ПОДСЧЕТА (например: "статистика по проектам", "сколько всего задач")
+   - ranking: ТОП N запросы с группировкой и подсчетом (например: "топ 3 менеджера по проектам", "какие 5 сотрудников ведут больше всего задач")
+   - complex_join: если запрос требует данные из НЕСКОЛЬКИХ таблиц (например: "объекты с менеджерами и бюджетом", "проекты с сотрудниками")
+   - report: если запрос для ОДНОЙ таблицы (например: "список проектов", "мои этапы")
 
-Примеры:
-- "Покажи количество проектов по статусам" → intent=chart, entities=[projects], metrics=[count], chart_type=pie
-- "Статистика завершенных объектов за последний месяц" → intent=statistics, entities=[objects], filters={{status: completed, date_range: last_month}}
-- "Сравни прогресс проектов" → intent=comparison, entities=[projects], metrics=[progress]
+   ВАЖНО: Если запрос содержит "распределение", "по статусам", "сколько в каждом", "диаграмма", "график" → используй intent="chart"!
+2. entities: какие сущности затрагивает запрос (projects, stages, objects, sections, tasks, profiles, view_employee_workloads, v_budgets_full, view_project_dashboard)
+   - Для complex_join: укажи ВСЕ нужные таблицы в порядке приоритета (главная таблица первой)
+3. requested_columns: КАКИЕ ИМЕННО колонки запросил пользователь (логические имена)
+   - "покажи проекты" → ["name"] (только названия)
+   - "проекты с менеджерами" → ["name", "first_name", "last_name"]
+   - "вся информация по проектам" → ["name", "status", "description", "created_at", "updated_at"]
+   - "активные проекты" → ["name", "status"]
+   - "проекты с бюджетом" → ["name", "total_amount", "spent"]
+   - "проекты по датам" или "с датами" → ["name", "created_at"] (ОБЯЗАТЕЛЬНО включай created_at!)
+   - "активные проекты по датам" → ["name", "status", "created_at"]
+   - [] = автоматический выбор минимальных колонок
+
+   ВАЖНО: Если в запросе есть слова "по датам", "с датами", "даты", "когда созданы" - ОБЯЗАТЕЛЬНО добавляй "created_at" в requested_columns!
+4. metrics: какие метрики нужны (count, sum, avg, progress, status_distribution, loading_rate, budget, spent, hours)
+5. filters: какие фильтры применить:
+   - status: статус (active, completed, in_progress)
+   - min_budget/max_budget: для условий "больше 1000", "меньше 5000", "от 1000 до 5000"
+   - min_hours/max_hours: для часов работы
+   - min_progress/max_progress: для процента готовности
+   - date_range: временной диапазон
+6. aggregation: группировка (daily, weekly, monthly, by_user, by_project)
+7. chart_type: тип визуализации:
+   - line: линейный график (тренды во времени, динамика)
+   - bar: столбчатая диаграмма (сравнение категорий)
+   - area: график с областями (объёмные данные, накопление)
+   - pie: круговая диаграмма (доли от целого, распределение)
+   - radar: лепестковая диаграмма (многомерное сравнение показателей)
+   - radialBar: радиальная диаграмма (прогресс, рейтинги, процент выполнения)
+   - table: таблица (детальные данные)
+8. personalized: персонализированный запрос (true если есть слова "мой/моя/мои/мне", иначе false)
+9. require_all_entities: если запрос ТРЕБУЕТ наличия данных из связанных таблиц (true = INNER JOIN, false = LEFT JOIN)
+   - true: когда говорят "С чем-то" ("объекты С именами ответственных", "проекты С бюджетом", "задачи С сотрудниками")
+   - true: когда есть фильтры на связанную таблицу ("бюджет > 1000" означает что бюджет ДОЛЖЕН быть)
+   - false: когда говорят "и их что-то" ("проекты и их бюджеты" - вернуть все проекты, даже без бюджета)
+10. limit: для ТОП N запросов - число N (например: "топ 3" → limit=3, "топ 5" → limit=5, "первые 10" → limit=10)
+11. order_by: по какой метрике сортировать (count, total_amount, spent, hours)
+12. order_direction: направление сортировки (desc для "больше всего", asc для "меньше всего")
+13. group_by_entity: для ranking - по какой сущности группировать (profiles для "менеджеры/сотрудники", projects для "проекты")
+14. exclude_related: если запрос ищет сущности БЕЗ связанных данных (true = LEFT JOIN + WHERE NULL, false = обычное поведение)
+   - true: когда говорят "БЕЗ чего-то", "НЕТ чего-то", "У КОТОРЫХ НЕТ" ("сотрудники без задач", "проекты без бюджета", "объекты у которых нет ответственных")
+   - false: все остальные случаи
+
+КРИТИЧНЫЕ ПРАВИЛА ДЛЯ ВЫБОРА ENTITY (читай ВНИМАТЕЛЬНО слова в запросе):
+- Проект/проекты/проектов → projects
+- Этап/этапы/этапов/стадия/стадии → stages
+- Объект/объекты/объектов → objects
+- Раздел/разделы/разделов/секция → sections
+- Задача/задачи/задач/таск → tasks
+- Сотрудник/сотрудники/пользователь/юзер/человек → profiles
+- Загрузка/занятость/перегружен/кто загружен → view_employee_workloads
+- Бюджет/финансы/деньги/потрачено/остаток/расход → v_budgets_full
+- Часы/план часов/факт часов/трудозатраты → view_project_dashboard
+
+ВАЖНО: Если в запросе явно написано "этапы" или "стадии" - НЕ ВЫБИРАЙ projects! Выбирай stages!
+ВАЖНО: Если в запросе явно написано "объекты" - НЕ ВЫБИРАЙ projects! Выбирай objects!
+ВАЖНО: Если в запросе явно написано "разделы" - НЕ ВЫБИРАЙ projects! Выбирай sections!
+
+КРИТИЧНО: Для entities используй ТОЛЬКО то, что ЯВНО указано в запросе!
+- "Активные проекты с менеджерами" → entities=["projects", "profiles"] (НЕ добавляй v_budgets_full!)
+- "Проекты с бюджетом" → entities=["projects", "v_budgets_full"] (НЕ добавляй profiles!)
+- "Активные проекты" → entities=["projects"], filters={{"status": "active"}} (НЕ добавляй profiles или budgets!)
+- "Проекты" → entities=["projects"] (ТОЛЬКО проекты, без дополнительных таблиц!)
+
+Примеры с requested_columns:
+- "Покажи проекты" → entities=["projects"], requested_columns=["name"]
+- "Активные проекты" → entities=["projects"], requested_columns=["name", "status"], filters={{"status": "active"}}
+- "Вся информация по проектам" → entities=["projects"], requested_columns=["name", "status", "description", "created_at", "updated_at"]
+- "Мои проекты" → entities=["projects"], requested_columns=["name"], personalized=true
+- "Покажи этапы" → entities=["stages"], requested_columns=["name"]
+- "Статус всех этапов" → entities=["stages"], requested_columns=["name", "status"]
+- "Список объектов" → entities=["objects"], requested_columns=["name"]
+- "Мои объекты" → entities=["objects"], requested_columns=["name"], personalized=true
+- "Разделы проекта" → entities=["sections"]
+- "Задачи сотрудников" → entities=["tasks"]
+- "Кто перегружен?" → entities=["view_employee_workloads"]
+- "Бюджет проектов" → entities=["v_budgets_full"], filters={{"entity_type": "project"}}
+- "Топ 5 проектов по бюджету" → entities=["v_budgets_full"], chart_type="bar"
+- "Сколько потрачено денег" → entities=["v_budgets_full"], metrics=["spent"]
+- "Остаток бюджета" → entities=["v_budgets_full"], metrics=["remaining"]
+- "Часы по проектам" → entities=["view_project_dashboard"]
+
+ПРИМЕРЫ CHART/STATISTICS (распределение, статистика, группировка):
+- "Распределение проектов по статусам" → intent="chart", entities=["projects"], chart_type="pie", metrics=["status_distribution"]
+- "Сколько проектов в каждом статусе" → intent="chart", entities=["projects"], chart_type="bar"
+- "Статистика по проектам" → intent="statistics", entities=["projects"], metrics=["count"]
+- "Распределение задач по статусам" → intent="chart", entities=["tasks"], chart_type="pie"
+- "Сколько объектов у каждого ответственного" → intent="chart", entities=["objects"], chart_type="bar"
+- "График загрузки сотрудников" → intent="chart", entities=["view_employee_workloads"], chart_type="bar"
+- "Динамика создания проектов по месяцам" → intent="chart", entities=["projects"], chart_type="line", aggregation="monthly"
+- "Накопительный график бюджета" → intent="chart", entities=["v_budgets_full"], chart_type="area"
+- "Сравнение показателей проекта" → intent="chart", entities=["projects"], chart_type="radar"
+- "Прогресс выполнения проектов" → intent="chart", entities=["projects"], chart_type="radialBar", metrics=["progress"]
+- "Рейтинг сотрудников по загрузке" → intent="chart", entities=["view_employee_workloads"], chart_type="radialBar"
+
+ПРИМЕРЫ ОДНОЙ ТАБЛИЦЫ (intent=report):
+- "Активные проекты" → intent="report", entities=["projects"], requested_columns=["name", "status"], filters={{"status": "active"}}
+- "Активные проекты по датам" → intent="report", entities=["projects"], requested_columns=["name", "status", "created_at"], filters={{"status": "active"}}
+- "Проекты с датами" → intent="report", entities=["projects"], requested_columns=["name", "created_at"]
+- "Все проекты" → intent="report", entities=["projects"], requested_columns=["name"]
+- "Список этапов" → intent="report", entities=["stages"], requested_columns=["name"]
+- "Мои объекты" → intent="report", entities=["objects"], requested_columns=["name"], personalized=true
+
+ПРИМЕРЫ С ФИЛЬТРАМИ НА СВЯЗАННЫЕ ТАБЛИЦЫ:
+- "Активные проекты с бюджетом больше 1000" → intent="complex_join", entities=["projects", "v_budgets_full"], filters={{"status": "active", "min_budget": 1000}}, require_all_entities=true
+- "Проекты с бюджетом от 1000 до 5000" → intent="complex_join", entities=["projects", "v_budgets_full"], filters={{"min_budget": 1000, "max_budget": 5000}}, require_all_entities=true
+- "Объекты с ответственными где прогресс больше 50%" → intent="complex_join", entities=["objects", "profiles"], filters={{"min_progress": 50}}, require_all_entities=true
+- "Проекты без бюджета" → intent="complex_join", entities=["projects", "v_budgets_full"], exclude_related=true
+- "Сотрудники без задач" → intent="complex_join", entities=["profiles", "tasks"], exclude_related=true
+- "Сотрудники у которых нет активных задач на этой неделе" → intent="complex_join", entities=["profiles", "tasks"], filters={{"status": "active", "date_range": "this_week"}}, exclude_related=true
+- "Объекты без ответственных" → intent="complex_join", entities=["objects", "profiles"], exclude_related=true
+
+ПРИМЕРЫ COMPLEX_JOIN (ТОЛЬКО если явно указаны несколько сущностей):
+- "Объекты С именами ответственных" → intent="complex_join", entities=["objects", "profiles"], requested_columns=["name", "first_name", "last_name"], require_all_entities=true
+- "Активные проекты С менеджерами" → intent="complex_join", entities=["projects", "profiles"], requested_columns=["name", "status", "first_name", "last_name"], filters={{"status": "active"}}, require_all_entities=true
+- "Проекты С бюджетом" → intent="complex_join", entities=["projects", "v_budgets_full"], requested_columns=["name", "total_amount", "spent"], require_all_entities=true
+- "Вся информация по проектам с менеджерами" → intent="complex_join", entities=["projects", "profiles"], requested_columns=["name", "status", "description", "created_at", "first_name", "last_name", "email"], require_all_entities=true
+- "Проекты и их бюджеты" → intent="complex_join", entities=["projects", "v_budgets_full"], requested_columns=["name", "total_amount"], require_all_entities=false
+- "Проекты и их менеджеры" → intent="complex_join", entities=["projects", "profiles"], requested_columns=["name", "first_name", "last_name"], require_all_entities=false
+
+ПРИМЕРЫ RANKING (ТОП N с группировкой):
+- "Какие 3 менеджера ведут больше всего активных проектов?" → intent="ranking", entities=["projects"], group_by_entity="profiles", filters={{"status": "active"}}, limit=3, order_by="count", order_direction="desc"
+- "Топ 5 сотрудников по количеству задач" → intent="ranking", entities=["tasks"], group_by_entity="profiles", limit=5, order_by="count", order_direction="desc"
+- "Кто меньше всего загружен?" → intent="ranking", entities=["tasks"], group_by_entity="profiles", limit=5, order_by="count", order_direction="asc"
+- "Топ 10 проектов по бюджету" → intent="ranking", entities=["projects", "v_budgets_full"], group_by_entity="projects", limit=10, order_by="total_amount", order_direction="desc"
+- "Первые 3 этапа по прогрессу" → intent="ranking", entities=["stages"], group_by_entity="stages", limit=3, order_by="progress", order_direction="desc"
+
+НЕПРАВИЛЬНЫЕ примеры (НЕ делай так):
+- "Активные проекты с менеджерами" → ❌ entities=["projects", "profiles", "v_budgets_full"] (НЕ добавляй бюджет!)
+- "Проекты" → ❌ entities=["projects", "profiles"] (НЕ добавляй profiles если не упомянуты!)
 """
 
         try:
@@ -178,156 +257,307 @@ class AnalyticsAgent(BaseAgent):
             return parsed
         except Exception as e:
             logger.error(f"Error parsing query: {e}")
-            # Fallback to simple query
+            # Fallback: try to guess entity from query text
+            query_lower = query.lower()
+            entity = "projects"  # default
+
+            # Check for keywords in order of specificity
+            if any(word in query_lower for word in ['загрузк', 'занятост', 'перегруж']):
+                entity = "view_employee_workloads"
+            elif any(word in query_lower for word in ['бюджет', 'финанс', 'деньги', 'потрач', 'остаток', 'расход']):
+                entity = "v_budgets_full"
+            elif any(word in query_lower for word in ['час', 'трудозатрат']):
+                entity = "view_project_dashboard"
+            elif any(word in query_lower for word in ['этап', 'стади']):
+                entity = "stages"
+            elif any(word in query_lower for word in ['объект']):
+                entity = "objects"
+            elif any(word in query_lower for word in ['раздел', 'секци']):
+                entity = "sections"
+            elif any(word in query_lower for word in ['задач', 'таск']):
+                entity = "tasks"
+            elif any(word in query_lower for word in ['сотрудник', 'пользовател', 'юзер', 'человек']):
+                entity = "profiles"
+            elif any(word in query_lower for word in ['проект']):
+                entity = "projects"
+
+            logger.warning(f"Fallback entity selection: {entity}")
+
             return AnalyticsQuery(
                 intent="report",
-                entities=["projects"],
+                entities=[entity],
                 metrics=["count"]
             )
 
-    def _generate_sql(self, parsed_query: AnalyticsQuery, user_role: Optional[str] = None) -> str:
+    def _generate_sql(
+        self,
+        parsed_query: AnalyticsQuery,
+        user_role: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> str:
         """
-        Generate SQL query from structured analytics query
+        Generate SQL using SQLGenerator with RBAC
 
         Args:
-            parsed_query: Structured query
-            user_role: User role for RLS
+            parsed_query: Structured analytics query
+            user_role: User's role for RBAC filtering
+            user_id: User's ID for personalized queries
 
         Returns:
             SQL query string
         """
-        # Map intent to SQL templates
-        if parsed_query.intent == "report":
-            return self._generate_report_sql(parsed_query)
-        elif parsed_query.intent == "chart":
-            return self._generate_chart_sql(parsed_query)
-        elif parsed_query.intent == "statistics":
-            return self._generate_statistics_sql(parsed_query)
-        elif parsed_query.intent == "comparison":
-            return self._generate_comparison_sql(parsed_query)
-        else:
-            return self._generate_generic_sql(parsed_query)
+        # Generate SQL with parameters
+        sql, params = self.sql_generator.generate_sql(
+            parsed_query,
+            user_role or 'guest',
+            user_id
+        )
 
-    def _generate_report_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for reports"""
-        entity = query.entities[0] if query.entities else "projects"
+        # Inject parameters safely (escape SQL injection)
+        sql = self.sql_generator._inject_parameters_safe(sql, params)
 
-        # Example: Project report
-        if entity == "projects":
-            sql = """
-            SELECT
-                p.id,
-                p.name,
-                p.status,
-                COUNT(DISTINCT s.id) as stages_count,
-                AVG(s.progress) as avg_progress,
-                p.created_at
-            FROM projects p
-            LEFT JOIN stages s ON s.project_id = p.id
-            """
+        logger.info(f"Generated SQL: {sql[:200]}...")
+        return sql
 
-            # Add filters
-            conditions = []
-            if query.filters.status:
-                conditions.append(f"p.status = '{query.filters.status}'")
-            if query.filters.date_range:
-                conditions.append("p.created_at >= NOW() - INTERVAL '30 days'")
-
-            if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
-
-            sql += " GROUP BY p.id, p.name, p.status, p.created_at ORDER BY p.created_at DESC"
-            return sql
-
-        return "SELECT * FROM projects LIMIT 10"
-
-    def _generate_chart_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for chart data"""
-        entity = query.entities[0] if query.entities else "projects"
-
-        # Example: Status distribution
-        if "count" in query.metrics:
-            return f"""
-            SELECT
-                {entity[:-1]}_status as label,
-                COUNT(*) as value
-            FROM {entity}
-            GROUP BY {entity[:-1]}_status
-            ORDER BY value DESC
-            """
-
-        return f"SELECT COUNT(*) as count FROM {entity}"
-
-    def _generate_statistics_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for statistics"""
-        entity = query.entities[0] if query.entities else "projects"
-
-        return f"""
-        SELECT
-            COUNT(*) as total_count,
-            COUNT(DISTINCT responsible_id) as unique_users,
-            AVG(progress) as avg_progress,
-            MIN(created_at) as earliest_date,
-            MAX(updated_at) as latest_update
-        FROM {entity}
+    def _execute_sql(
+        self,
+        sql: str,
+        user_role: str = 'guest'
+    ) -> List[Dict[str, Any]]:
         """
-
-    def _generate_comparison_sql(self, query: AnalyticsQuery) -> str:
-        """Generate SQL for comparisons"""
-        return """
-        SELECT
-            p.name as project_name,
-            AVG(s.progress) as avg_progress,
-            COUNT(s.id) as stages_count
-        FROM projects p
-        LEFT JOIN stages s ON s.project_id = p.id
-        GROUP BY p.id, p.name
-        ORDER BY avg_progress DESC
-        """
-
-    def _generate_generic_sql(self, query: AnalyticsQuery) -> str:
-        """Fallback SQL generator"""
-        entity = query.entities[0] if query.entities else "projects"
-        return f"SELECT * FROM {entity} LIMIT 10"
-
-    def _execute_sql(self, sql: str) -> List[Dict[str, Any]]:
-        """
-        Execute SQL query safely
+        Execute SQL with retry logic and circuit breaker
 
         Args:
             sql: SQL query (SELECT only)
+            user_role: User role for sensitive column filtering
 
         Returns:
             Query results as list of dicts
         """
+        # Security check
+        if not sql.strip().upper().startswith("SELECT"):
+            raise ValueError("Only SELECT queries are allowed")
+
+        logger.info(f"Executing SQL for role={user_role}")
+
         try:
-            # Safety check: only SELECT queries
-            if not sql.strip().upper().startswith("SELECT"):
-                raise ValueError("Only SELECT queries are allowed")
+            # Execute with retry
+            data = self._execute_sql_with_retry(sql, user_role)
 
-            # Execute via Supabase RPC or raw SQL
-            # Note: Supabase Python client doesn't support raw SQL directly
-            # You may need to create a Postgres function or use psycopg2
+            # Filter sensitive columns based on role
+            data = self._filter_sensitive_columns(data, user_role)
 
-            logger.info(f"Executing SQL: {sql}")
-
-            # Execute SQL via Supabase RPC
-            # NOTE: You need to create a Postgres function 'execute_analytics_query' in Supabase
-            # Or use direct table queries for simple cases
-
-            # For now, execute via Supabase client (read-only queries)
-            try:
-                response = self.db.supabase.rpc('execute_analytics_query', {'sql_query': sql}).execute()
-                return response.data if response.data else []
-            except Exception as rpc_error:
-                logger.warning(f"RPC execution failed: {rpc_error}, falling back to direct query")
-                # Fallback: try direct table query for simple SELECT statements
-                # This is a simplified approach - in production, use proper RPC or ORM
-                return []
+            return data
 
         except Exception as e:
-            logger.error(f"SQL execution error: {e}")
+            logger.error(f"SQL execution failed after retries: {e}")
             return []
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10)
+    )
+    def _execute_sql_with_retry(
+        self,
+        sql: str,
+        user_role: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute SQL with retry and circuit breaker
+
+        Args:
+            sql: SQL query string
+            user_role: User role for logging
+
+        Returns:
+            Query results
+
+        Raises:
+            Exception: If circuit breaker is open or execution fails
+        """
+        # Check circuit breaker
+        if self.circuit_breaker.is_open():
+            logger.warning("Circuit breaker OPEN - skipping SQL execution")
+            raise Exception("Circuit breaker open")
+
+        # Check if Supabase client is available
+        if not self.db.is_available():
+            logger.error("Supabase client not available")
+            raise Exception("Supabase client not initialized")
+
+        try:
+            # Call RPC function
+            response = self.db.client.rpc(
+                'execute_analytics_query',
+                {'query_text': sql, 'user_role_name': user_role}
+            ).execute()
+
+            # Record success
+            self.circuit_breaker.record_success()
+
+            # Parse JSONB result
+            return self._parse_jsonb_result(response.data)
+
+        except Exception as e:
+            # Record failure
+            self.circuit_breaker.record_failure()
+            logger.error(f"RPC execution failed: {e}")
+            raise
+
+    def _parse_jsonb_result(self, data: List[Dict]) -> List[Dict]:
+        """
+        Parse JSONB from RPC response
+
+        Args:
+            data: Raw RPC response data
+
+        Returns:
+            Parsed list of dicts
+        """
+        if not data:
+            return []
+
+        # RPC returns [{"result": {...}}, {"result": {...}}, ...]
+        if isinstance(data, list) and len(data) > 0:
+            if 'result' in data[0]:
+                return [row['result'] for row in data]
+
+        return data
+
+    def _filter_sensitive_columns(
+        self,
+        data: List[Dict[str, Any]],
+        user_role: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Remove sensitive columns based on user role
+
+        Args:
+            data: Query results
+            user_role: User's role
+
+        Returns:
+            Filtered data
+        """
+        if user_role in ['admin', 'manager']:
+            # Full access
+            return data
+
+        # Define sensitive columns by role
+        sensitive = {
+            'guest': ['email', 'phone', 'password', 'first_name', 'last_name'],
+            'viewer': ['email', 'phone', 'password'],
+            'engineer': ['password']
+        }
+
+        blocked = sensitive.get(user_role, [])
+
+        if not blocked:
+            return data
+
+        # Filter out sensitive columns
+        return [
+            {k: ('[Hidden]' if k in blocked else v) for k, v in row.items()}
+            for row in data
+        ]
+
+    def _generate_empty_message(self, user_query: str, entity: str, personalized: bool) -> str:
+        """
+        Generate context-aware message when no data found
+
+        Args:
+            user_query: Original query
+            entity: Entity type (projects, tasks, etc.)
+            personalized: Whether query was personalized
+
+        Returns:
+            User-friendly message explaining why no data
+        """
+        entity_names = {
+            'projects': 'проектов',
+            'stages': 'этапов',
+            'objects': 'объектов',
+            'sections': 'разделов',
+            'tasks': 'задач',
+            'profiles': 'сотрудников',
+            'view_employee_workloads': 'данных о загрузке',
+            'v_budgets_full': 'данных о бюджете',
+            'view_project_dashboard': 'данных о часах',
+            'view_planning_analytics_summary': 'аналитических данных',
+            'view_my_work_analytics': 'данных о вашей работе'
+        }
+
+        entity_name = entity_names.get(entity, 'данных')
+
+        if personalized:
+            if entity == 'projects':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вы не назначены менеджером ни на одном проекте."
+            elif entity == 'tasks':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вам не назначены задачи."
+            elif entity == 'objects':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вы не назначены ответственным ни на одном объекте."
+            elif entity == 'sections':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, вы не ответственный ни на одном разделе."
+            elif entity == 'stages':
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}. Возможно, нет этапов с объектами, где вы ответственный."
+            else:
+                return f"По запросу '{user_query}' не найдено ваших {entity_name}."
+        else:
+            if entity == 'view_employee_workloads':
+                return f"По запросу '{user_query}' не найдено {entity_name}. Возможно, данные о планировании еще не внесены."
+            else:
+                return f"По запросу '{user_query}' не найдено {entity_name}."
+
+    def _is_data_empty(self, data: List[Dict[str, Any]]) -> bool:
+        """
+        Check if data contains only None values (empty view)
+
+        Args:
+            data: Query results
+
+        Returns:
+            True if all non-id values are None
+        """
+        if not data:
+            return True
+
+        # Check if all values (except IDs) are None
+        for row in data:
+            # Get non-id values
+            values = [v for k, v in row.items() if 'id' not in k.lower() and 'name' not in k.lower()]
+            # If any non-None value exists, data is not empty
+            if any(v is not None for v in values):
+                return False
+
+        return True
+
+    def _prepare_table_data(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Prepare table data in frontend-friendly format
+
+        Args:
+            data: Query results as list of dicts
+
+        Returns:
+            Dict with columns and rows structure
+        """
+        if not data:
+            return {"columns": [], "rows": []}
+
+        # Extract column names from first row, filter out ID columns
+        all_columns = list(data[0].keys())
+        columns = [
+            col for col in all_columns
+            if not (col.endswith('_id') or col == 'id')
+        ]
+
+        # Convert list of dicts to list of lists (only non-ID columns)
+        rows = [[row.get(col) for col in columns] for row in data]
+
+        return {
+            "columns": columns,
+            "rows": rows
+        }
 
     def _prepare_chart_data(
         self,
@@ -400,45 +630,165 @@ class AnalyticsAgent(BaseAgent):
                     }
                 }
             }
+        elif chart_type == "area":
+            return {
+                "type": "area",
+                "data": {
+                    "labels": [row.get("date", row.get("label", "")) for row in data],
+                    "datasets": [{
+                        "label": "Объём",
+                        "data": [row.get("value", 0) for row in data],
+                        "borderColor": "#36A2EB",
+                        "backgroundColor": "rgba(54, 162, 235, 0.3)",
+                        "fill": True
+                    }]
+                },
+                "options": {
+                    "responsive": True,
+                    "scales": {
+                        "y": {"beginAtZero": True}
+                    }
+                }
+            }
+        elif chart_type == "radar":
+            return {
+                "type": "radar",
+                "data": {
+                    "labels": [row.get("label", row.get("name", "")) for row in data],
+                    "datasets": [{
+                        "label": "Показатели",
+                        "data": [row.get("value", row.get("progress", 0)) for row in data],
+                        "borderColor": "#36A2EB",
+                        "backgroundColor": "rgba(54, 162, 235, 0.2)"
+                    }]
+                },
+                "options": {
+                    "responsive": True,
+                    "scales": {
+                        "r": {"beginAtZero": True, "max": 100}
+                    }
+                }
+            }
+        elif chart_type == "radialBar":
+            return {
+                "type": "radialBar",
+                "data": {
+                    "labels": [row.get("label", row.get("name", row.get("project_name", ""))) for row in data],
+                    "datasets": [{
+                        "label": "Прогресс",
+                        "data": [row.get("value", row.get("progress", row.get("avg_progress", 0))) for row in data]
+                    }]
+                },
+                "options": {
+                    "responsive": True,
+                    "max": 100
+                }
+            }
         else:
             return {}
+
+    def _get_chart_title(self, query: AnalyticsQuery) -> str:
+        """Generate chart title based on query"""
+        entity_names = {
+            'projects': 'Проекты',
+            'stages': 'Этапы',
+            'objects': 'Объекты',
+            'sections': 'Разделы',
+            'tasks': 'Задачи',
+            'profiles': 'Сотрудники',
+            'view_employee_workloads': 'Загрузка сотрудников',
+            'v_budgets_full': 'Бюджеты'
+        }
+
+        entity = query.entities[0] if query.entities else 'projects'
+        entity_name = entity_names.get(entity, entity)
+
+        if query.chart_type == 'radialBar':
+            return f"Прогресс: {entity_name}"
+        elif query.chart_type == 'pie':
+            return f"Распределение: {entity_name}"
+        elif query.chart_type == 'bar':
+            return f"Сравнение: {entity_name}"
+        elif query.chart_type == 'line':
+            return f"Динамика: {entity_name}"
+        else:
+            return entity_name
 
     def process_analytics(
         self,
         user_query: str,
-        user_role: Optional[str] = None
+        user_role: Optional[str] = None,
+        user_id: Optional[str] = None
     ) -> AnalyticsResult:
         """
-        Main analytics processing pipeline
+        Main analytics processing pipeline with RBAC support
 
         Args:
             user_query: Natural language query
-            user_role: User role for RBAC
+            user_role: User role for RBAC filtering
+            user_id: User ID for personalized queries
 
         Returns:
             AnalyticsResult with data and visualization config
         """
-        logger.info(f"📊 ANALYTICS AGENT: processing query: '{user_query}'")
+        logger.info(f"📊 ANALYTICS: query='{user_query}', role={user_role}, user_id={user_id}")
 
         try:
             # Step 1: Parse natural language to structured query
             parsed_query = self._parse_user_query(user_query, user_role)
 
-            # Step 2: Generate SQL
-            sql = self._generate_sql(parsed_query, user_role)
+            # Step 2: Generate SQL with RBAC
+            sql = self._generate_sql(parsed_query, user_role, user_id)
 
-            # Step 3: Execute SQL
-            data = self._execute_sql(sql)
+            # Step 3: Execute SQL with retry
+            data = self._execute_sql(sql, user_role or 'guest')
+
+            # Check if data is empty or contains only None values
+            if not data or self._is_data_empty(data):
+                # Generate context-aware empty message
+                entity = parsed_query.entities[0] if parsed_query.entities else 'проекты'
+                empty_message = self._generate_empty_message(user_query, entity, parsed_query.personalized)
+
+                return AnalyticsResult(
+                    type="text",
+                    content=empty_message,
+                    sql_query=sql,
+                    metadata={"row_count": 0, "empty_data": True}
+                )
 
             # Step 4: Determine result type
-            if parsed_query.chart_type:
-                # Return chart data
-                chart_config = self._prepare_chart_data(data, parsed_query.chart_type)
+            # Special handling for workload queries - return analytics, not table
+            if parsed_query.entities and 'view_employee_workloads' in parsed_query.entities:
+                # Return text analysis with insights
+                summary = self._generate_workload_analysis(data, user_query)
+                return AnalyticsResult(
+                    type="text",
+                    content=summary,
+                    sql_query=sql,
+                    metadata={"row_count": len(data)}
+                )
+            elif parsed_query.chart_type and parsed_query.chart_type != 'table':
+                # Return chart data (pie, bar, line, area, radar, radialBar)
+                logger.info(f"Chart data (first 3): {json.dumps(data[:3] if data else [], ensure_ascii=False, default=str)}")
+
+                # Determine data keys for frontend
+                x_key = "label" if data and "label" in data[0] else "name"
+                y_keys = ["value"] if data and "value" in data[0] else ["count"]
+
+                # Format content as expected by frontend ChartWidget
+                chart_content = {
+                    "chartType": parsed_query.chart_type,
+                    "data": data,
+                    "xKey": x_key,
+                    "yKeys": y_keys,
+                    "title": self._get_chart_title(parsed_query),
+                    "valueSuffix": "%" if parsed_query.chart_type == "radialBar" else ""
+                }
+
                 return AnalyticsResult(
                     type="chart",
-                    content=data,
+                    content=chart_content,
                     sql_query=sql,
-                    chart_config=chart_config,
                     metadata={"row_count": len(data)}
                 )
             elif parsed_query.intent == "statistics":
@@ -451,10 +801,11 @@ class AnalyticsAgent(BaseAgent):
                     metadata={"row_count": len(data)}
                 )
             else:
-                # Return table
+                # Return table (including when chart_type='table')
+                table_data = self._prepare_table_data(data)
                 return AnalyticsResult(
                     type="table",
-                    content=data,
+                    content=table_data,
                     sql_query=sql,
                     metadata={"row_count": len(data)}
                 )
@@ -466,6 +817,65 @@ class AnalyticsAgent(BaseAgent):
                 content=f"Произошла ошибка при обработке аналитического запроса: {str(e)}",
                 metadata={"error": str(e)}
             )
+
+    def _generate_workload_analysis(self, data: List[Dict[str, Any]], user_query: str) -> str:
+        """
+        Generate workload analysis with insights
+
+        Args:
+            data: Workload data from view_employee_workloads
+            user_query: Original user query
+
+        Returns:
+            Analytical text summary in Russian
+        """
+        if not data:
+            return "Данных о загрузке сотрудников не найдено."
+
+        # Filter out rows with None loading_rate
+        workload_data = [row for row in data if row.get('loading_rate') is not None]
+
+        if not workload_data:
+            return "В данный момент нет активной загрузки у сотрудников. Возможно, данные о планировании еще не внесены."
+
+        # Analyze workload
+        loading_rates = [row['loading_rate'] for row in workload_data]
+        avg_load = sum(loading_rates) / len(loading_rates)
+
+        overloaded = [row for row in workload_data if row['loading_rate'] > 100]
+        high_load = [row for row in workload_data if 80 <= row['loading_rate'] <= 100]
+        normal_load = [row for row in workload_data if 50 <= row['loading_rate'] < 80]
+        low_load = [row for row in workload_data if row['loading_rate'] < 50]
+
+        # Build analysis
+        analysis = f"📊 **Анализ загрузки сотрудников**\n\n"
+        analysis += f"Всего сотрудников с активной загрузкой: {len(workload_data)}\n"
+        analysis += f"Средняя загрузка: {avg_load:.1f}%\n\n"
+
+        if overloaded:
+            analysis += f"⚠️ **Перегружены ({len(overloaded)} чел.):**\n"
+            for row in overloaded[:5]:  # Top 5
+                analysis += f"- {row['full_name']}: {row['loading_rate']}% ({row.get('project_name', 'N/A')})\n"
+            if len(overloaded) > 5:
+                analysis += f"... и еще {len(overloaded) - 5} человек\n"
+            analysis += "\n"
+
+        if high_load:
+            analysis += f"🔶 **Высокая загрузка ({len(high_load)} чел.):** 80-100%\n\n"
+
+        if normal_load:
+            analysis += f"✅ **Нормальная загрузка ({len(normal_load)} чел.):** 50-80%\n\n"
+
+        if low_load:
+            analysis += f"📉 **Низкая загрузка ({len(low_load)} чел.):** <50%\n\n"
+
+        # Recommendations
+        if overloaded:
+            analysis += "💡 **Рекомендации:**\n"
+            analysis += "- Перераспределить задачи перегруженных сотрудников\n"
+            analysis += "- Привлечь дополнительные ресурсы к проектам\n"
+
+        return analysis
 
     def _generate_summary(self, data: List[Dict[str, Any]], query: AnalyticsQuery) -> str:
         """Generate text summary from data"""
@@ -508,3 +918,60 @@ class AnalyticsAgent(BaseAgent):
     def process_message(self, user_message: str, user_role: Optional[str] = None) -> str:
         """Alias for answer_question"""
         return self.answer_question(user_message, user_role)
+
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern for SQL execution protection
+
+    Prevents cascading failures by stopping requests when error rate is too high.
+    States: closed (normal), open (blocking), half_open (testing recovery)
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
+        """
+        Initialize circuit breaker
+
+        Args:
+            failure_threshold: Number of failures before opening circuit
+            recovery_timeout: Seconds to wait before attempting recovery
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = 'closed'  # closed, open, half_open
+
+    def is_open(self) -> bool:
+        """
+        Check if circuit is open (blocking requests)
+
+        Returns:
+            True if circuit is open
+        """
+        if self.state == 'open':
+            # Try to recover after timeout
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                logger.info("Circuit breaker: transitioning to HALF-OPEN")
+                self.state = 'half_open'
+                return False
+            return True
+        return False
+
+    def record_success(self):
+        """Record successful execution - reset failure count"""
+        if self.state == 'half_open':
+            logger.info("Circuit breaker: CLOSED (recovered)")
+        self.state = 'closed'
+        self.failure_count = 0
+
+    def record_failure(self):
+        """Record failed execution - increment failure count"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+
+        if self.failure_count >= self.failure_threshold:
+            logger.error(
+                f"Circuit breaker: OPEN (threshold reached: {self.failure_count})"
+            )
+            self.state = 'open'

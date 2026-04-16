@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     orchestrator_model: str = Field("gpt-4o", alias="ORCHESTRATOR_MODEL")
     orchestrator_temperature: float = Field(0.7, alias="ORCHESTRATOR_TEMPERATURE")
     rag_agent_model: str = Field("gpt-4o", alias="RAG_AGENT_MODEL")
+    teams_agent_model: str = Field("gpt-5.4-mini", alias="TEAMS_AGENT_MODEL")
     rag_agent_temperature: float = Field(0.5, alias="RAG_AGENT_TEMPERATURE")
     max_agent_iterations: int = Field(5, alias="MAX_AGENT_ITERATIONS")
     agent_max_iterations: int = Field(10, alias="AGENT_MAX_ITERATIONS")

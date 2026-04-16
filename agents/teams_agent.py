@@ -45,21 +45,33 @@ class ActionItem(BaseModel):
     assignee: Optional[str] = Field(None, description="Person responsible")
     deadline: Optional[str] = Field(None, description="Deadline if mentioned")
     priority: Optional[str] = Field(None, description="Priority: high/medium/low")
-
-
-class FollowUpItem(BaseModel):
-    """Follow-up item to check or revisit later"""
-    description: str = Field(description="What to follow up on")
-    owner: Optional[str] = Field(None, description="Who should follow up")
-    context: Optional[str] = Field(None, description="Why this needs follow-up")
+    status: str = Field(default="Новый", description="Status: Новый/В работе/Выполнено/Отложено")
 
 
 class DiscussionTopic(BaseModel):
-    """A thematic discussion block with detailed breakdown"""
+    """A thematic discussion block with actions embedded"""
     topic: str = Field(description="Dynamic topic name based on discussion content")
     summary: str = Field(description="Overview of what was discussed")
     details: List[str] = Field(description="Key points with context and specifics")
+    actions: List[ActionItem] = Field(default_factory=list, description="Action items related to this topic")
     participants_involved: List[str] = Field(description="Who participated in this topic")
+
+
+class OpenQuestion(BaseModel):
+    """Open question that needs an answer or follow-up"""
+    question: str = Field(description="The question that remains open")
+    responsible: Optional[str] = Field(None, description="Who should find the answer")
+    deadline: Optional[str] = Field(None, description="Deadline for getting the answer")
+    comment: Optional[str] = Field(None, description="Additional context or notes")
+
+
+class Risk(BaseModel):
+    """Risk identified during the meeting"""
+    risk: str = Field(description="Risk description")
+    cause: Optional[str] = Field(None, description="Root cause or trigger")
+    consequences: Optional[str] = Field(None, description="Potential impact if risk materializes")
+    responsible: Optional[str] = Field(None, description="Person responsible for mitigation")
+    mitigation: Optional[str] = Field(None, description="Planned mitigation action")
 
 
 class SpeakerHighlight(BaseModel):
@@ -70,17 +82,18 @@ class SpeakerHighlight(BaseModel):
 
 
 class MeetingReport(BaseModel):
-    """Structured meeting report combining Notion-style and speaker-centric approaches"""
+    """Structured meeting report based on corporate protocol template"""
     title: str = Field(description="Meeting title")
     date: str = Field(description="Meeting date")
     duration: Optional[str] = Field(None, description="Meeting duration")
     participants: List[MeetingParticipant] = Field(description="Participants list")
     executive_summary: str = Field(description="2-3 sentence executive summary")
-    action_items: List[ActionItem] = Field(description="Action items with assignees and deadlines")
+    discussion_topics: List[DiscussionTopic] = Field(description="Thematic discussion blocks with embedded actions")
+    action_items: List[ActionItem] = Field(description="Flat list of ALL action items for quick reference")
     key_decisions: List[str] = Field(description="Key decisions made during the meeting")
-    discussion_topics: List[DiscussionTopic] = Field(description="Thematic discussion blocks with details")
+    open_questions: List[OpenQuestion] = Field(default_factory=list, description="Questions that need answers")
+    risks: List[Risk] = Field(default_factory=list, description="Identified risks with mitigation plans")
     speaker_highlights: List[SpeakerHighlight] = Field(description="Compact per-speaker contributions")
-    follow_up: List[FollowUpItem] = Field(description="Items to revisit or check later")
     key_takeaways: List[str] = Field(description="Key takeaways and insights")
 
 
@@ -95,7 +108,7 @@ class TeamsAgent(BaseAgent):
     """
 
     def __init__(self, model: str = None, temperature: float = None):
-        model = model or settings.orchestrator_model
+        model = model or settings.teams_agent_model
         temperature = temperature if temperature is not None else 0.2
 
         super().__init__(model=model, temperature=temperature)
@@ -199,11 +212,12 @@ class TeamsAgent(BaseAgent):
                 duration=meeting.duration,
                 executive_summary=f"Ошибка при обработке встречи: {str(e)}",
                 participants=meeting.participants,
+                discussion_topics=[],
                 action_items=[],
                 key_decisions=[],
-                discussion_topics=[],
+                open_questions=[],
+                risks=[],
                 speaker_highlights=[],
-                follow_up=[],
                 key_takeaways=[],
             )
 

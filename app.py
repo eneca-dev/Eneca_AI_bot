@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 
 # Импорты агента и базы данных
 from agents.orchestrator import OrchestratorAgent
+from agents.analytics_agent import AnalyticsAgent
+from agents.analytics_models import AnalyticsResult
 from core.config import settings
 from database.supabase_client import supabase_db_client
 
@@ -29,6 +31,23 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+
+class AnalyticsRequest(BaseModel):
+    """Analytics request model"""
+    query: str
+    user_id: Optional[str] = None
+    user_role: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class AnalyticsResponse(BaseModel):
+    """Analytics response model"""
+    type: str  # "text", "table", "chart", "mixed"
+    content: Any  # String, list, or dict depending on type
+    sql_query: Optional[str] = None
+    chart_config: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = {}
+    success: bool = True
+    error: Optional[str] = None
 
 # --- Модели для Supabase Webhook ---
 class SupabaseWebhookRecord(BaseModel):
@@ -55,6 +74,7 @@ class WebhookResponse(BaseModel):
 
 # --- Глобальные переменные ---
 agent = None
+analytics_agent = None
 realtime_listener = None  # Realtime subscription listener
 
 # --- Жизненный цикл ---
@@ -114,27 +134,112 @@ app.add_middleware(
 # ==========================================
 
 # --- Эндпоинт ---
+def get_analytics_agent() -> AnalyticsAgent:
+    """Get or create analytics agent instance"""
+    global analytics_agent
+    if analytics_agent is None:
+        logger.info("Initializing AnalyticsAgent...")
+        analytics_agent = AnalyticsAgent()
+        logger.info("AnalyticsAgent initialized successfully")
+    return analytics_agent
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
     global agent
-    
+
     if not agent:
         raise HTTPException(status_code=500, detail="Agent not initialized")
 
     try:
         logger.info(f"Processing message for thread {request.thread_id}")
-        
+
         # Запускаем обработку сообщения
         bot_response = agent.process_message(
-            request.message, 
+            request.message,
             thread_id=request.thread_id
         )
-        
+
         return ChatResponse(response=bot_response)
 
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/analytics", response_model=AnalyticsResponse)
+async def analytics_endpoint(request: AnalyticsRequest):
+    """
+    Analytics endpoint for data analysis, reporting, and visualization
+
+    Expected payload:
+    {
+        "query": "Natural language query for analytics",
+        "user_id": "optional-user-id",
+        "user_role": "optional-user-role (admin/manager/engineer/viewer/guest)",
+        "metadata": {}
+    }
+    """
+    try:
+        logger.info(f"📊 Received analytics request: query='{request.query}', user_id={request.user_id}")
+
+        # Get analytics agent
+        agent_instance = get_analytics_agent()
+
+        # Determine user role and ID for RBAC
+        user_role = request.user_role
+        user_id = request.user_id  # Extract user_id from request
+
+        if not user_role and user_id:
+            # Load user role from database
+            if supabase_db_client.is_available():
+                user_context = supabase_db_client.get_user_profile(user_id)
+                if user_context:
+                    user_role = user_context.get('role_name', 'guest')
+                    logger.info(f"Loaded user role from DB: {user_role}")
+                else:
+                    user_role = 'guest'
+                    logger.warning(f"No profile found for user_id={user_id}, using guest role")
+            else:
+                user_role = 'guest'
+                logger.warning("Supabase not available, using guest role")
+        elif not user_role:
+            user_role = 'guest'
+            user_id = None  # No user_id if no role provided
+            logger.info("No user_role or user_id provided, using guest role")
+
+        # Process analytics query with user_id for personalized queries
+        logger.info(f"Processing analytics query with role: {user_role}, user_id: {user_id}")
+        result: AnalyticsResult = agent_instance.process_analytics(
+            user_query=request.query,
+            user_role=user_role,
+            user_id=user_id  # Pass user_id to agent
+        )
+
+        logger.info(f"Analytics result generated: type={result.type}, rows={result.metadata.get('row_count', 0)}")
+
+        # Create response
+        response = AnalyticsResponse(
+            type=result.type,
+            content=result.content,
+            sql_query=result.sql_query,
+            chart_config=result.chart_config,
+            metadata=result.metadata,
+            success=True
+        )
+
+        logger.info(f"Sending analytics response: type={response.type}, content_type={type(response.content)}")
+        if response.type == "table":
+            logger.info(f"Table content structure: {response.content}")
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error processing analytics request: {e}", exc_info=True)
+        return AnalyticsResponse(
+            type="text",
+            content="Произошла ошибка при обработке запроса на аналитику.",
+            success=False,
+            error=str(e)
+        )
 
 # --- Background Task Function ---
 def process_webhook_message(record: SupabaseWebhookRecord):

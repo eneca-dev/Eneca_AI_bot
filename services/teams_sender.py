@@ -229,13 +229,33 @@ def format_report_as_text(report) -> str:
     lines.append(f"**Резюме:** {report.executive_summary}")
     lines.append("")
 
-    # Action Items — most important, first
+    # Discussion topics with embedded actions
+    if report.discussion_topics:
+        lines.append("**Обсужденные вопросы:**")
+        lines.append("")
+        for topic in report.discussion_topics:
+            lines.append(f"**{topic.topic}**")
+            lines.append(f"{topic.summary}")
+            if topic.details:
+                for detail in topic.details:
+                    lines.append(f"- {detail}")
+            if topic.actions:
+                lines.append("  _Действия:_")
+                for a in topic.actions:
+                    assignee = f" — **{a.assignee}**" if a.assignee else ""
+                    deadline = f" ({a.deadline})" if a.deadline and a.deadline.lower().startswith("до") else f" (до {a.deadline})" if a.deadline else ""
+                    lines.append(f"  - [ ] {a.description}{assignee}{deadline}")
+            if topic.participants_involved:
+                lines.append(f"_Участники: {', '.join(topic.participants_involved)}_")
+            lines.append("")
+
+    # Action Items — flat quick-reference list
     if report.action_items:
-        lines.append("**Action Items & Next Steps:**")
+        lines.append("**Все действия (сводка):**")
         for item in report.action_items:
             assignee = f" — **{item.assignee}**" if item.assignee else ""
             priority = f" [{item.priority}]" if item.priority else ""
-            deadline = f" (до {item.deadline})" if item.deadline else ""
+            deadline = f" ({item.deadline})" if item.deadline and item.deadline.lower().startswith("до") else f" (до {item.deadline})" if item.deadline else ""
             lines.append(f"- [ ] {item.description}{assignee}{priority}{deadline}")
         lines.append("")
 
@@ -246,17 +266,29 @@ def format_report_as_text(report) -> str:
             lines.append(f"- {d}")
         lines.append("")
 
-    # Discussion topics with details
-    if report.discussion_topics:
-        for topic in report.discussion_topics:
-            lines.append(f"**{topic.topic}**")
-            lines.append(f"{topic.summary}")
-            if topic.details:
-                for detail in topic.details:
-                    lines.append(f"- {detail}")
-            if topic.participants_involved:
-                lines.append(f"_Участники: {', '.join(topic.participants_involved)}_")
-            lines.append("")
+    # Open questions
+    if report.open_questions:
+        lines.append("**Открытые вопросы:**")
+        for q in report.open_questions:
+            responsible = f" — {q.responsible}" if q.responsible else ""
+            deadline = f" ({q.deadline})" if q.deadline and q.deadline.lower().startswith("до") else f" (до {q.deadline})" if q.deadline else ""
+            comment = f" _{q.comment}_" if q.comment else ""
+            lines.append(f"- {q.question}{responsible}{deadline}{comment}")
+        lines.append("")
+
+    # Risks
+    if report.risks:
+        lines.append("**Риски:**")
+        for r in report.risks:
+            responsible = f" — {r.responsible}" if r.responsible else ""
+            lines.append(f"- **{r.risk}**{responsible}")
+            if r.cause:
+                lines.append(f"  Причина: {r.cause}")
+            if r.consequences:
+                lines.append(f"  Последствия: {r.consequences}")
+            if r.mitigation:
+                lines.append(f"  Действие: {r.mitigation}")
+        lines.append("")
 
     # Speaker highlights
     if report.speaker_highlights:
@@ -264,14 +296,6 @@ def format_report_as_text(report) -> str:
         for s in report.speaker_highlights:
             activity = f" ({s.activity_level})" if s.activity_level else ""
             lines.append(f"- **{s.speaker}**{activity}: {'; '.join(s.key_contributions[:3])}")
-        lines.append("")
-
-    # Follow-up
-    if report.follow_up:
-        lines.append("**Follow-up:**")
-        for f in report.follow_up:
-            owner = f" — {f.owner}" if f.owner else ""
-            lines.append(f"- {f.description}{owner}")
         lines.append("")
 
     # Key takeaways

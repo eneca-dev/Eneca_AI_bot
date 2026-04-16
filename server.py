@@ -823,42 +823,56 @@ async def _process_recording_with_whisper(bot_id: str):
 
         # 3. Get speaker timeline from Recall to map speakers to Whisper segments
         speaker_timeline = await recall_client.get_speaker_timeline(bot_id)
+        if speaker_timeline:
+            timeline_names = list(set(
+                e.get("participant", {}).get("name", "?") for e in speaker_timeline
+            ))
+            logger.info(f"Recall speaker_timeline: {len(speaker_timeline)} entries, "
+                        f"participants: {timeline_names}")
+            for i, entry in enumerate(speaker_timeline):
+                name = entry.get("participant", {}).get("name", "?")
+                start = entry.get("start_timestamp", {}).get("relative", 0)
+                end = entry.get("end_timestamp", {}).get("relative", 0)
+                logger.info(f"  timeline[{i}]: {start:.1f}s - {end:.1f}s → {name}")
+        else:
+            logger.warning(f"Recall speaker_timeline is EMPTY for bot {bot_id} "
+                           "— all segments will be labeled 'Speaker'")
 
-        def _get_speaker_at(seconds: float) -> str:
-            """Find who was speaking at a given timestamp using Recall speaker_timeline."""
+        def _get_speaker_for_segment(seg_start: float, seg_end: float) -> str:
+            """Find who was speaking during a segment by max overlap with speaker_timeline."""
             if not speaker_timeline:
                 return "Speaker"
 
-            # Exact match — timestamp falls within a speaker interval
+            # Calculate overlap duration with each speaker
+            speaker_overlap: dict[str, float] = {}
             for entry in speaker_timeline:
-                start = entry.get("start_timestamp", {}).get("relative", 0)
-                end = entry.get("end_timestamp", {}).get("relative", 0)
-                if start <= seconds <= end:
-                    return entry.get("participant", {}).get("name", "Speaker")
+                tl_start = entry.get("start_timestamp", {}).get("relative", 0)
+                tl_end = entry.get("end_timestamp", {}).get("relative", 0)
+                overlap = max(0, min(seg_end, tl_end) - max(seg_start, tl_start))
+                if overlap > 0:
+                    name = entry.get("participant", {}).get("name", "Speaker")
+                    speaker_overlap[name] = speaker_overlap.get(name, 0) + overlap
 
-            # No exact match — find the nearest speaker by time distance
+            if speaker_overlap:
+                return max(speaker_overlap, key=speaker_overlap.get)
+
+            # No overlap — find nearest speaker by time distance
             best_name = "Speaker"
             best_dist = float("inf")
             for entry in speaker_timeline:
-                start = entry.get("start_timestamp", {}).get("relative", 0)
-                end = entry.get("end_timestamp", {}).get("relative", 0)
-                dist = min(abs(seconds - start), abs(seconds - end))
+                tl_start = entry.get("start_timestamp", {}).get("relative", 0)
+                tl_end = entry.get("end_timestamp", {}).get("relative", 0)
+                dist = min(abs(seg_start - tl_end), abs(seg_end - tl_start))
                 if dist < best_dist:
                     best_dist = dist
                     best_name = entry.get("participant", {}).get("name", "Speaker")
             return best_name
 
-        # Assign speaker names to Whisper segments
+        # Assign speaker names to Whisper segments using max overlap
         for seg in segments:
-            ts = seg.get("timestamp", "00:00")
-            parts = ts.split(":")
-            if len(parts) == 3:
-                total_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-            elif len(parts) == 2:
-                total_sec = int(parts[0]) * 60 + int(parts[1])
-            else:
-                total_sec = 0
-            seg["speaker"] = _get_speaker_at(total_sec)
+            seg_start = seg.get("start_sec", 0)
+            seg_end = seg.get("end_sec", seg_start)
+            seg["speaker"] = _get_speaker_for_segment(seg_start, seg_end)
 
         # 4. Get meeting metadata from Recall
         bot_data = await recall_client.get_bot_status(bot_id)
@@ -874,7 +888,16 @@ async def _process_recording_with_whisper(bot_id: str):
 
         # Collect unique speaker names from segments
         unique_speakers = list(set(seg["speaker"] for seg in segments))
+        generic_count = sum(1 for seg in segments if seg["speaker"] == "Speaker")
         logger.info(f"Speakers detected: {unique_speakers}")
+        logger.info(f"Speaker assignment stats: {len(segments) - generic_count}/{len(segments)} "
+                    f"segments mapped to real speakers, {generic_count} remained generic 'Speaker'")
+
+        # Log full transcript with speakers for debugging
+        logger.info("=== FULL TRANSCRIPT WITH SPEAKERS ===")
+        for seg in segments:
+            logger.info(f"  [{seg['timestamp']}] {seg['speaker']}: {seg['text']}")
+        logger.info("=== END TRANSCRIPT ===")
 
         # Build MeetingTranscript
         meeting = MeetingTranscript(
