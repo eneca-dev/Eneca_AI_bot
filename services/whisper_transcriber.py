@@ -139,6 +139,7 @@ class WhisperTranscriber:
         segments = []
         for seg in response.segments or []:
             start = getattr(seg, "start", 0) + time_offset
+            end = getattr(seg, "end", start) + time_offset
             minutes = int(start // 60)
             seconds = int(start % 60)
             timestamp = f"{minutes:02d}:{seconds:02d}"
@@ -148,6 +149,8 @@ class WhisperTranscriber:
                 segments.append({
                     "speaker": "Speaker",
                     "timestamp": timestamp,
+                    "start_sec": start,
+                    "end_sec": end,
                     "text": text,
                 })
 

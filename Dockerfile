@@ -1,6 +1,12 @@
 # 1. Берем легкую версию Python 3.11
 FROM python:3.11-slim
 
+# Устанавливаем системные пакеты для обработки видео и звука
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # 2. Отключаем кэширование (чтобы логи были видны сразу)
 ENV PYTHONUNBUFFERED=1
 
