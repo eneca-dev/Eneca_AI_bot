@@ -9,7 +9,7 @@ from agents.orchestrator import OrchestratorAgent
 from agents.analytics_agent import AnalyticsAgent, AnalyticsResult
 from agents.teams_agent import (
     TeamsAgent, MeetingTranscript, MeetingReport,
-    MeetingParticipant, TranscriptSegment,
+    MeetingParticipant, TranscriptSegment, Author,
 )
 from services.teams_sender import teams_sender, format_report_as_text
 from services.recall_client import recall_client
@@ -170,6 +170,24 @@ MEETING_URL_PATTERNS = [
     # Google Meet links
     re.compile(r'https?://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}[^\s<>"]*', re.IGNORECASE),
 ]
+
+
+def _build_author_from_conversation(conversation_id: Optional[str]) -> Optional[Author]:
+    """Build a protocol Author from the stored Teams conversation reference.
+
+    Returns None when no conversation is known; callers fall back to DEFAULT_AUTHOR.
+    Organization and role are not provided by Teams/Bot Framework without extra
+    Graph API calls, so they stay empty in this iteration.
+    """
+    if not conversation_id:
+        return None
+    ref = teams_sender.get_conversation_reference(conversation_id)
+    if not ref:
+        return None
+    user_name = ref.get("user_name")
+    if not user_name:
+        return None
+    return Author(organization=None, name=user_name, role=None)
 
 
 def extract_meeting_url(text: str) -> Optional[str]:
@@ -536,13 +554,16 @@ async def teams_process_meeting(
 
         agent_instance = get_teams_agent()
 
+        author = _build_author_from_conversation(request.teams_conversation_id)
+
         loop = asyncio.get_event_loop()
         report = await loop.run_in_executor(
-            None, agent_instance.process_meeting, request.meeting
+            None, agent_instance.process_meeting, request.meeting, author
         )
 
-        logger.info(f"Meeting report generated: {len(report.action_items)} action items, "
-                     f"{len(report.key_decisions)} decisions")
+        logger.info(f"Meeting report generated: {len(report.discussion_items)} discussion items, "
+                     f"{len(report.open_questions)} open questions, "
+                     f"{len(report.risks)} risks")
 
         # Send report to Teams if configured and requested
         teams_sent = False
@@ -920,13 +941,15 @@ async def _process_recording_with_whisper(bot_id: str):
 
         # 4. Process with TeamsAgent
         agent_instance = get_teams_agent()
+        author = _build_author_from_conversation(conversation_id)
         report = await loop.run_in_executor(
-            None, agent_instance.process_meeting, meeting
+            None, agent_instance.process_meeting, meeting, author
         )
 
         logger.info(f"Report generated for bot {bot_id}: "
-                     f"{len(report.action_items)} action items, "
-                     f"{len(report.key_decisions)} decisions")
+                     f"{len(report.discussion_items)} discussion items, "
+                     f"{len(report.open_questions)} open questions, "
+                     f"{len(report.risks)} risks")
 
         # 5. Send report to Teams
         if conversation_id and teams_sender.is_configured:

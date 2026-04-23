@@ -218,91 +218,120 @@ class TeamsSender:
             return response.json()
 
 
+_DASH = "—"
+_EMPTY_SECTION = "Нет"
+
+
+def _val(v) -> str:
+    """Render optional value as em dash when empty/None."""
+    if v is None:
+        return _DASH
+    s = str(v).strip()
+    return s if s else _DASH
+
+
+def _format_header(report) -> list:
+    lines = [
+        f"**Протокол совещания от {_val(report.date)}**",
+        "",
+        f"**Место проведения:** {_val(report.location)}",
+        f"**Дата:** {_val(report.date)}",
+        f"**Проект:** {_val(report.project)}",
+        f"**Транскрибация:** {_val(report.transcript_url)}",
+        f"**Предмет совещания:** {_val(report.subject)}",
+        f"**Ссылка на протокол предшествующего совещания:** {_val(report.previous_protocol_url)}",
+        "",
+        "**Участники:**",
+    ]
+    if report.participants:
+        for i, p in enumerate(report.participants, 1):
+            lines.append(
+                f"{i}. Организация: {_val(p.organization)} | "
+                f"ФИО: {_val(p.name)} | "
+                f"Должность: {_val(p.role)}"
+            )
+    else:
+        lines.append(_EMPTY_SECTION)
+    return lines
+
+
+def _format_numbered_section(title: str, items: list, render_item) -> list:
+    """Render a numbered section. `render_item(item)` returns a list of lines (without leading '1.')."""
+    lines = ["", f"**{title}**"]
+    if not items:
+        lines.append(_EMPTY_SECTION)
+        return lines
+    for i, item in enumerate(items, 1):
+        item_lines = render_item(item)
+        if not item_lines:
+            continue
+        lines.append(f"{i}. {item_lines[0]}")
+        for extra in item_lines[1:]:
+            lines.append(f"   {extra}")
+    return lines
+
+
+def _render_discussion_item(item) -> list:
+    return [
+        f"Вопрос/тема: {_val(item.topic)}",
+        f"Итог/действие: {_val(item.outcome)}",
+        f"Ответственный: {_val(item.responsible)}",
+        f"Срок: {_val(item.deadline)}",
+        f"Статус: {_val(item.status)}",
+    ]
+
+
+def _render_open_question(q) -> list:
+    return [
+        f"Вопрос: {_val(q.question)}",
+        f"Ответственный: {_val(q.responsible)}",
+        f"Срок получения ответа: {_val(q.deadline)}",
+        f"Комментарий: {_val(q.comment)}",
+    ]
+
+
+def _render_risk(r) -> list:
+    return [
+        f"Риск: {_val(r.risk)}",
+        f"Причина: {_val(r.cause)}",
+        f"Возможные последствия: {_val(r.consequences)}",
+        f"Ответственный: {_val(r.responsible)}",
+        f"Действие: {_val(r.mitigation)}",
+    ]
+
+
+def _format_author(author) -> list:
+    if author is None:
+        return ["", f"**Составитель:** {_DASH}"]
+    parts = [p for p in (author.organization, author.name, author.role) if p]
+    return ["", f"**Составитель:** {', '.join(parts) if parts else _DASH}"]
+
+
 def format_report_as_text(report) -> str:
-    """Format MeetingReport as readable text for Teams message"""
+    """Format MeetingReport as readable text following the Eneca protocol template."""
     lines = []
+    lines.extend(_format_header(report))
 
-    # Header
-    lines.append(f"**{report.title}**")
-    lines.append(f"_{report.date}_ | {report.duration or 'N/A'}")
-    lines.append("")
-    lines.append(f"**Резюме:** {report.executive_summary}")
-    lines.append("")
-
-    # Discussion topics with embedded actions
-    if report.discussion_topics:
-        lines.append("**Обсужденные вопросы:**")
+    if report.preview_summary:
         lines.append("")
-        for topic in report.discussion_topics:
-            lines.append(f"**{topic.topic}**")
-            lines.append(f"{topic.summary}")
-            if topic.details:
-                for detail in topic.details:
-                    lines.append(f"- {detail}")
-            if topic.actions:
-                lines.append("  _Действия:_")
-                for a in topic.actions:
-                    assignee = f" — **{a.assignee}**" if a.assignee else ""
-                    deadline = f" ({a.deadline})" if a.deadline and a.deadline.lower().startswith("до") else f" (до {a.deadline})" if a.deadline else ""
-                    lines.append(f"  - [ ] {a.description}{assignee}{deadline}")
-            if topic.participants_involved:
-                lines.append(f"_Участники: {', '.join(topic.participants_involved)}_")
-            lines.append("")
+        lines.append(f"**Резюме:** {report.preview_summary}")
 
-    # Action Items — flat quick-reference list
-    if report.action_items:
-        lines.append("**Все действия (сводка):**")
-        for item in report.action_items:
-            assignee = f" — **{item.assignee}**" if item.assignee else ""
-            priority = f" [{item.priority}]" if item.priority else ""
-            deadline = f" ({item.deadline})" if item.deadline and item.deadline.lower().startswith("до") else f" (до {item.deadline})" if item.deadline else ""
-            lines.append(f"- [ ] {item.description}{assignee}{priority}{deadline}")
-        lines.append("")
-
-    # Key decisions
-    if report.key_decisions:
-        lines.append("**Ключевые решения:**")
-        for d in report.key_decisions:
-            lines.append(f"- {d}")
-        lines.append("")
-
-    # Open questions
-    if report.open_questions:
-        lines.append("**Открытые вопросы:**")
-        for q in report.open_questions:
-            responsible = f" — {q.responsible}" if q.responsible else ""
-            deadline = f" ({q.deadline})" if q.deadline and q.deadline.lower().startswith("до") else f" (до {q.deadline})" if q.deadline else ""
-            comment = f" _{q.comment}_" if q.comment else ""
-            lines.append(f"- {q.question}{responsible}{deadline}{comment}")
-        lines.append("")
-
-    # Risks
-    if report.risks:
-        lines.append("**Риски:**")
-        for r in report.risks:
-            responsible = f" — {r.responsible}" if r.responsible else ""
-            lines.append(f"- **{r.risk}**{responsible}")
-            if r.cause:
-                lines.append(f"  Причина: {r.cause}")
-            if r.consequences:
-                lines.append(f"  Последствия: {r.consequences}")
-            if r.mitigation:
-                lines.append(f"  Действие: {r.mitigation}")
-        lines.append("")
-
-    # Speaker highlights
-    if report.speaker_highlights:
-        lines.append("**По спикерам:**")
-        for s in report.speaker_highlights:
-            activity = f" ({s.activity_level})" if s.activity_level else ""
-            lines.append(f"- **{s.speaker}**{activity}: {'; '.join(s.key_contributions[:3])}")
-        lines.append("")
-
-    # Key takeaways
-    if report.key_takeaways:
-        lines.append("**Выводы:**")
-        for t in report.key_takeaways:
-            lines.append(f"- {t}")
+    lines.extend(_format_numbered_section(
+        "1. Обсужденные вопросы, договоренности и действия",
+        report.discussion_items,
+        _render_discussion_item,
+    ))
+    lines.extend(_format_numbered_section(
+        "2. Открытые вопросы",
+        report.open_questions,
+        _render_open_question,
+    ))
+    lines.extend(_format_numbered_section(
+        "3. Риски",
+        report.risks,
+        _render_risk,
+    ))
+    lines.extend(_format_author(report.author))
 
     return "\n".join(lines)
 
