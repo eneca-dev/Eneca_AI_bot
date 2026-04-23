@@ -1,4 +1,16 @@
-"""Teams Agent for processing meeting transcripts and generating structured reports"""
+"""Teams Agent for processing meeting transcripts and generating structured reports.
+
+Schema follows the Eneca corporate protocol template
+('2026.03.09 Шаблон протокола совещания'):
+- Header block (subject / date / location / project / transcript link / previous protocol / participants)
+- Section 1: Обсужденные вопросы, договоренности и действия (flat DiscussionItem list)
+- Section 2: Открытые вопросы
+- Section 3: Риски
+- Author block
+
+Caller-supplied metadata (author, location, transcript_url, previous_protocol_url)
+is attached after the LLM call so the model cannot hallucinate it.
+"""
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
@@ -19,15 +31,16 @@ class TranscriptSegment(BaseModel):
 
 
 class MeetingParticipant(BaseModel):
-    """Meeting participant info"""
+    """Meeting participant info. Mirrors the 'Участники' table columns in the template."""
     model_config = ConfigDict(extra="forbid")
 
+    organization: Optional[str] = Field(None, description="Organization — only if explicitly mentioned in the transcript")
     name: str = Field(description="Full name of the participant")
-    role: Optional[str] = Field(None, description="Role/position of the participant")
+    role: Optional[str] = Field(None, description="Role / job title")
 
 
 class MeetingTranscript(BaseModel):
-    """Complete meeting transcript input"""
+    """Complete meeting transcript input."""
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(description="Meeting title")
@@ -39,73 +52,80 @@ class MeetingTranscript(BaseModel):
 
 # --- Output Models ---
 
-class ActionItem(BaseModel):
-    """Action item extracted from the meeting"""
-    description: str = Field(description="What needs to be done")
-    assignee: Optional[str] = Field(None, description="Person responsible")
-    deadline: Optional[str] = Field(None, description="Deadline if mentioned")
-    priority: Optional[str] = Field(None, description="Priority: high/medium/low")
-    status: str = Field(default="Новый", description="Status: Новый/В работе/Выполнено/Отложено")
+class Author(BaseModel):
+    """Protocol author. Filled by the caller from the Teams conversation reference."""
+    organization: Optional[str] = Field(None, description="Organization of the author")
+    name: str = Field(description="Author full name")
+    role: Optional[str] = Field(None, description="Author job title")
 
 
-class DiscussionTopic(BaseModel):
-    """A thematic discussion block with actions embedded"""
-    topic: str = Field(description="Dynamic topic name based on discussion content")
-    summary: str = Field(description="Overview of what was discussed")
-    details: List[str] = Field(description="Key points with context and specifics")
-    actions: List[ActionItem] = Field(default_factory=list, description="Action items related to this topic")
-    participants_involved: List[str] = Field(description="Who participated in this topic")
+class DiscussionItem(BaseModel):
+    """One row of section 1 'Обсужденные вопросы, договоренности и действия'.
+
+    Flat structure — one row per discussed topic. Decisions and actions
+    are merged into `outcome` (the template has no separate 'decisions' section).
+    """
+    topic: str = Field(description="Вопрос / тема")
+    outcome: str = Field(description="Итог / действие — объединяет решение и действие в одном поле")
+    responsible: Optional[str] = Field(None, description="Ответственный")
+    deadline: Optional[str] = Field(None, description="Срок (без предлога 'до')")
+    status: str = Field(default="Новый", description="Новый / В работе / Выполнено / Отложено")
 
 
 class OpenQuestion(BaseModel):
-    """Open question that needs an answer or follow-up"""
-    question: str = Field(description="The question that remains open")
-    responsible: Optional[str] = Field(None, description="Who should find the answer")
-    deadline: Optional[str] = Field(None, description="Deadline for getting the answer")
-    comment: Optional[str] = Field(None, description="Additional context or notes")
+    """Row of section 2 'Открытые вопросы'."""
+    question: str = Field(description="Вопрос")
+    responsible: Optional[str] = Field(None, description="Ответственный")
+    deadline: Optional[str] = Field(None, description="Срок получения ответа")
+    comment: Optional[str] = Field(None, description="Комментарий")
 
 
 class Risk(BaseModel):
-    """Risk identified during the meeting"""
-    risk: str = Field(description="Risk description")
-    cause: Optional[str] = Field(None, description="Root cause or trigger")
-    consequences: Optional[str] = Field(None, description="Potential impact if risk materializes")
-    responsible: Optional[str] = Field(None, description="Person responsible for mitigation")
-    mitigation: Optional[str] = Field(None, description="Planned mitigation action")
+    """Row of section 3 'Риски'."""
+    risk: str = Field(description="Риск")
+    cause: Optional[str] = Field(None, description="Причина")
+    consequences: Optional[str] = Field(None, description="Возможные последствия")
+    responsible: Optional[str] = Field(None, description="Ответственный")
+    mitigation: Optional[str] = Field(None, description="Действие / митигация")
 
 
-class SpeakerHighlight(BaseModel):
-    """Compact speaker contribution summary"""
-    speaker: str = Field(description="Speaker name")
-    key_contributions: List[str] = Field(description="Main points, proposals, and positions")
-    activity_level: Optional[str] = Field(None, description="Estimated activity, e.g. '~30% встречи'")
+class LLMMeetingReport(BaseModel):
+    """Part of the protocol that the LLM fills from the transcript.
+
+    Caller-supplied fields (date, duration, location, urls, author) are NOT
+    exposed to the model — they are attached later in `process_meeting`.
+    """
+    subject: str = Field(description="Предмет совещания")
+    project: Optional[str] = Field(None, description="Проект — заполнять только если явно упомянут в транскрипте")
+    participants: List[MeetingParticipant] = Field(description="Участники")
+    preview_summary: Optional[str] = Field(
+        None,
+        description="2-3 предложения для превью в Teams; не является частью формального протокола",
+    )
+    discussion_items: List[DiscussionItem] = Field(description="Раздел 1 — плоский список")
+    open_questions: List[OpenQuestion] = Field(description="Раздел 2 — открытые вопросы (пустой список если нет)")
+    risks: List[Risk] = Field(description="Раздел 3 — риски (пустой список если нет)")
 
 
-class MeetingReport(BaseModel):
-    """Structured meeting report based on corporate protocol template"""
-    title: str = Field(description="Meeting title")
-    date: str = Field(description="Meeting date")
-    duration: Optional[str] = Field(None, description="Meeting duration")
-    participants: List[MeetingParticipant] = Field(description="Participants list")
-    executive_summary: str = Field(description="2-3 sentence executive summary")
-    discussion_topics: List[DiscussionTopic] = Field(description="Thematic discussion blocks with embedded actions")
-    action_items: List[ActionItem] = Field(description="Flat list of ALL action items for quick reference")
-    key_decisions: List[str] = Field(description="Key decisions made during the meeting")
-    open_questions: List[OpenQuestion] = Field(default_factory=list, description="Questions that need answers")
-    risks: List[Risk] = Field(default_factory=list, description="Identified risks with mitigation plans")
-    speaker_highlights: List[SpeakerHighlight] = Field(description="Compact per-speaker contributions")
-    key_takeaways: List[str] = Field(description="Key takeaways and insights")
+class MeetingReport(LLMMeetingReport):
+    """Complete protocol: LLM output + caller-supplied metadata."""
+    date: str = Field(description="Дата встречи (копируется из входа)")
+    duration: Optional[str] = Field(None, description="Длительность (копируется из входа)")
+    location: str = Field(default="Microsoft Teams", description="Место проведения")
+    transcript_url: Optional[str] = Field(None, description="Ссылка на транскрибацию")
+    previous_protocol_url: Optional[str] = Field(None, description="Ссылка на протокол предшествующего совещания")
+    author: Author = Field(description="Составитель")
+
+
+DEFAULT_AUTHOR = Author(
+    organization="Eneca",
+    name="Meeting Bot",
+    role="Автоматический протокол",
+)
 
 
 class TeamsAgent(BaseAgent):
-    """
-    Teams Agent for processing meeting transcripts and generating structured reports.
-
-    Capabilities:
-    - Analyze conference transcripts by speakers
-    - Extract key moments, decisions, and action items
-    - Generate Notion-style structured meeting reports
-    """
+    """Teams Agent for processing meeting transcripts and generating structured reports."""
 
     def __init__(self, model: str = None, temperature: float = None):
         model = model or settings.teams_agent_model
@@ -113,7 +133,9 @@ class TeamsAgent(BaseAgent):
 
         super().__init__(model=model, temperature=temperature)
 
-        self.report_llm = self.llm.with_structured_output(MeetingReport)
+        # LLM returns the subset of fields it is responsible for;
+        # caller-supplied metadata (author, location, urls, date, duration) is attached afterwards.
+        self.report_llm = self.llm.with_structured_output(LLMMeetingReport)
 
         logger.info(f"TeamsAgent initialized with model {model}")
 
@@ -131,60 +153,45 @@ class TeamsAgent(BaseAgent):
             return self._get_fallback_prompt()
 
     def _get_fallback_prompt(self) -> str:
-        """Fallback prompt if file not found"""
-        return """Ты — Teams Agent для обработки и анализа совещаний в системе Eneca.
-
-Твоя задача: анализировать транскрипты конференций и генерировать структурированные отчёты.
-
-Формат отчёта:
-1. Executive Summary — краткое резюме встречи (2-3 предложения)
-2. Action Items & Next Steps — задачи с ответственными и дедлайнами
-3. Ключевые решения — только явные, подтверждённые решения
-4. Тематические блоки — динамические секции по содержанию с деталями
-5. По спикерам — ключевые тезисы каждого участника
-6. Follow-up — что нужно проверить или обсудить позже
-7. Ключевые выводы — главные инсайты
-
-ВАЖНО:
-- Опирайся только на содержание транскрипта
-- Отчёт на русском языке
-- Сохраняй оригинальные имена спикеров
-"""
+        return (
+            "Ты — Teams Agent. Формируй протокол встречи по корпоративному шаблону Eneca: "
+            "шапка + раздел 1 «Обсужденные вопросы / итог / ответственный / срок / статус», "
+            "раздел 2 «Открытые вопросы», раздел 3 «Риски». Отчёт на русском. "
+            "Опирайся только на содержание транскрипта."
+        )
 
     def _prepare_transcript_text(self, meeting: MeetingTranscript) -> str:
         """Format meeting transcript into a text prompt for the LLM"""
-        parts = []
-
-        # Meeting metadata
-        parts.append(f"# Встреча: {meeting.title}")
-        parts.append(f"Дата: {meeting.date}")
+        parts = [f"# Встреча: {meeting.title}", f"Дата: {meeting.date}"]
         if meeting.duration:
             parts.append(f"Длительность: {meeting.duration}")
 
-        # Participants
         parts.append("\n## Участники:")
         for p in meeting.participants:
+            org = f"[{p.organization}] " if p.organization else ""
             role_str = f" ({p.role})" if p.role else ""
-            parts.append(f"- {p.name}{role_str}")
+            parts.append(f"- {org}{p.name}{role_str}")
 
-        # Transcript
         parts.append("\n## Транскрипт:")
         for segment in meeting.transcript:
             parts.append(f"[{segment.timestamp}] {segment.speaker}: {segment.text}")
 
         return "\n".join(parts)
 
-    def process_meeting(self, meeting: MeetingTranscript) -> MeetingReport:
-        """
-        Main processing pipeline: analyze transcript and generate structured report.
+    def process_meeting(
+        self,
+        meeting: MeetingTranscript,
+        author: Optional[Author] = None,
+    ) -> MeetingReport:
+        """Transcript → structured protocol aligned with the Eneca template.
 
         Args:
-            meeting: Validated meeting transcript
-
-        Returns:
-            Structured MeetingReport
+            meeting: Validated meeting transcript.
+            author: Protocol author. Defaults to the Eneca meeting bot.
         """
         logger.info(f"Processing meeting: '{meeting.title}', {len(meeting.transcript)} segments")
+
+        author = author or DEFAULT_AUTHOR
 
         try:
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -193,44 +200,62 @@ class TeamsAgent(BaseAgent):
 
             messages = [
                 SystemMessage(content=self.system_prompt),
-                HumanMessage(content=f"Проанализируй следующую встречу и создай структурированный отчёт:\n\n{transcript_text}")
+                HumanMessage(content=(
+                    "Проанализируй следующую встречу и сформируй протокол по "
+                    "корпоративному шаблону Eneca:\n\n" + transcript_text
+                )),
             ]
 
-            report = self.report_llm.invoke(messages)
+            llm_report: LLMMeetingReport = self.report_llm.invoke(messages)
 
-            logger.info(f"Report generated: {len(report.action_items)} action items, "
-                        f"{len(report.key_decisions)} decisions")
+            report = MeetingReport(
+                subject=llm_report.subject,
+                project=llm_report.project,
+                participants=llm_report.participants,
+                preview_summary=llm_report.preview_summary,
+                discussion_items=llm_report.discussion_items,
+                open_questions=llm_report.open_questions,
+                risks=llm_report.risks,
+                # Caller-supplied / authoritative from input
+                date=meeting.date,
+                duration=meeting.duration,
+                location="Microsoft Teams",
+                transcript_url=None,
+                previous_protocol_url=None,
+                author=author,
+            )
+
+            logger.info(
+                f"Report generated: {len(report.discussion_items)} discussion items, "
+                f"{len(report.open_questions)} open questions, {len(report.risks)} risks"
+            )
 
             return report
 
         except Exception as e:
             logger.error(f"Error processing meeting: {e}")
-            # Return a minimal fallback report
             return MeetingReport(
-                title=meeting.title,
+                subject=meeting.title,
                 date=meeting.date,
                 duration=meeting.duration,
-                executive_summary=f"Ошибка при обработке встречи: {str(e)}",
+                project=None,
                 participants=meeting.participants,
-                discussion_topics=[],
-                action_items=[],
-                key_decisions=[],
+                preview_summary=f"Ошибка при обработке встречи: {str(e)}",
+                discussion_items=[],
                 open_questions=[],
                 risks=[],
-                speaker_highlights=[],
-                key_takeaways=[],
+                location="Microsoft Teams",
+                transcript_url=None,
+                previous_protocol_url=None,
+                author=author,
             )
 
-    def process_meeting_raw(self, meeting_json: dict) -> dict:
-        """
-        Convenience method: accepts raw dict, returns dict.
-
-        Args:
-            meeting_json: Raw meeting data as dict
-
-        Returns:
-            Report as dict
-        """
+    def process_meeting_raw(
+        self,
+        meeting_json: dict,
+        author: Optional[Author] = None,
+    ) -> dict:
+        """Convenience: dict in, dict out."""
         meeting = MeetingTranscript(**meeting_json)
-        report = self.process_meeting(meeting)
+        report = self.process_meeting(meeting, author=author)
         return report.model_dump()
