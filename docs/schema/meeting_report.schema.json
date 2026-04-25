@@ -1,0 +1,392 @@
+{
+  "$defs": {
+    "Author": {
+      "description": "Protocol author. Filled by the caller from the Teams conversation reference.",
+      "properties": {
+        "organization": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Organization of the author",
+          "title": "Organization"
+        },
+        "name": {
+          "description": "Author full name",
+          "title": "Name",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Author job title",
+          "title": "Role"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Author",
+      "type": "object"
+    },
+    "DiscussionItem": {
+      "description": "One row of section 1 'Обсужденные вопросы, договоренности и действия'.\n\nFlat structure — one row per discussed topic. Decisions and actions\nare merged into `outcome` (the template has no separate 'decisions' section).",
+      "properties": {
+        "topic": {
+          "description": "Вопрос / тема",
+          "title": "Topic",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "Итог / действие — объединяет решение и действие в одном поле",
+          "title": "Outcome",
+          "type": "string"
+        },
+        "responsible": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ответственный",
+          "title": "Responsible"
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Срок (без предлога 'до')",
+          "title": "Deadline"
+        },
+        "status": {
+          "default": "Новый",
+          "description": "Новый / В работе / Выполнено / Отложено",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic",
+        "outcome"
+      ],
+      "title": "DiscussionItem",
+      "type": "object"
+    },
+    "MeetingParticipant": {
+      "additionalProperties": false,
+      "description": "Meeting participant info. Mirrors the 'Участники' table columns in the template.",
+      "properties": {
+        "organization": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Organization — only if explicitly mentioned in the transcript",
+          "title": "Organization"
+        },
+        "name": {
+          "description": "Full name of the participant",
+          "title": "Name",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Role / job title",
+          "title": "Role"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "MeetingParticipant",
+      "type": "object"
+    },
+    "OpenQuestion": {
+      "description": "Row of section 2 'Открытые вопросы'.",
+      "properties": {
+        "question": {
+          "description": "Вопрос",
+          "title": "Question",
+          "type": "string"
+        },
+        "responsible": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ответственный",
+          "title": "Responsible"
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Срок получения ответа",
+          "title": "Deadline"
+        },
+        "comment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Комментарий",
+          "title": "Comment"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "title": "OpenQuestion",
+      "type": "object"
+    },
+    "Risk": {
+      "description": "Row of section 3 'Риски'.",
+      "properties": {
+        "risk": {
+          "description": "Риск",
+          "title": "Risk",
+          "type": "string"
+        },
+        "cause": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Причина",
+          "title": "Cause"
+        },
+        "consequences": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Возможные последствия",
+          "title": "Consequences"
+        },
+        "responsible": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ответственный",
+          "title": "Responsible"
+        },
+        "mitigation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Действие / митигация",
+          "title": "Mitigation"
+        }
+      },
+      "required": [
+        "risk"
+      ],
+      "title": "Risk",
+      "type": "object"
+    }
+  },
+  "description": "Complete protocol: LLM output + caller-supplied metadata.",
+  "properties": {
+    "subject": {
+      "description": "Предмет совещания",
+      "title": "Subject",
+      "type": "string"
+    },
+    "project": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Проект — заполнять только если явно упомянут в транскрипте",
+      "title": "Project"
+    },
+    "participants": {
+      "description": "Участники",
+      "items": {
+        "$ref": "#/$defs/MeetingParticipant"
+      },
+      "title": "Participants",
+      "type": "array"
+    },
+    "preview_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "2-3 предложения для превью в Teams; не является частью формального протокола",
+      "title": "Preview Summary"
+    },
+    "discussion_items": {
+      "description": "Раздел 1 — плоский список",
+      "items": {
+        "$ref": "#/$defs/DiscussionItem"
+      },
+      "title": "Discussion Items",
+      "type": "array"
+    },
+    "open_questions": {
+      "description": "Раздел 2 — открытые вопросы (пустой список если нет)",
+      "items": {
+        "$ref": "#/$defs/OpenQuestion"
+      },
+      "title": "Open Questions",
+      "type": "array"
+    },
+    "risks": {
+      "description": "Раздел 3 — риски (пустой список если нет)",
+      "items": {
+        "$ref": "#/$defs/Risk"
+      },
+      "title": "Risks",
+      "type": "array"
+    },
+    "date": {
+      "description": "Дата встречи (копируется из входа)",
+      "title": "Date",
+      "type": "string"
+    },
+    "duration": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Длительность (копируется из входа)",
+      "title": "Duration"
+    },
+    "location": {
+      "default": "Microsoft Teams",
+      "description": "Место проведения",
+      "title": "Location",
+      "type": "string"
+    },
+    "transcript_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Ссылка на транскрибацию",
+      "title": "Transcript Url"
+    },
+    "previous_protocol_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Ссылка на протокол предшествующего совещания",
+      "title": "Previous Protocol Url"
+    },
+    "author": {
+      "$ref": "#/$defs/Author",
+      "description": "Составитель"
+    }
+  },
+  "required": [
+    "subject",
+    "participants",
+    "discussion_items",
+    "open_questions",
+    "risks",
+    "date",
+    "author"
+  ],
+  "title": "MeetingReport",
+  "type": "object"
+}

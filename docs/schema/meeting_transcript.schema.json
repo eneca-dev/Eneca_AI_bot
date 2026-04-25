@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "MeetingParticipant": {
+      "additionalProperties": false,
+      "description": "Meeting participant info. Mirrors the 'Участники' table columns in the template.",
+      "properties": {
+        "organization": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Organization — only if explicitly mentioned in the transcript",
+          "title": "Organization"
+        },
+        "name": {
+          "description": "Full name of the participant",
+          "title": "Name",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Role / job title",
+          "title": "Role"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "MeetingParticipant",
+      "type": "object"
+    },
+    "TranscriptSegment": {
+      "additionalProperties": false,
+      "description": "Single speech segment from the meeting transcript",
+      "properties": {
+        "speaker": {
+          "description": "Speaker name",
+          "title": "Speaker",
+          "type": "string"
+        },
+        "timestamp": {
+          "description": "Timestamp in format HH:MM:SS or MM:SS",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "text": {
+          "description": "Speech content",
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "speaker",
+        "timestamp",
+        "text"
+      ],
+      "title": "TranscriptSegment",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete meeting transcript input.",
+  "properties": {
+    "title": {
+      "description": "Meeting title",
+      "title": "Title",
+      "type": "string"
+    },
+    "date": {
+      "description": "Meeting date in ISO format",
+      "title": "Date",
+      "type": "string"
+    },
+    "duration": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Meeting duration (e.g., '1h 30m')",
+      "title": "Duration"
+    },
+    "participants": {
+      "description": "List of participants",
+      "items": {
+        "$ref": "#/$defs/MeetingParticipant"
+      },
+      "title": "Participants",
+      "type": "array"
+    },
+    "transcript": {
+      "description": "Ordered transcript segments",
+      "items": {
+        "$ref": "#/$defs/TranscriptSegment"
+      },
+      "title": "Transcript",
+      "type": "array"
+    }
+  },
+  "required": [
+    "title",
+    "date",
+    "participants",
+    "transcript"
+  ],
+  "title": "MeetingTranscript",
+  "type": "object"
+}

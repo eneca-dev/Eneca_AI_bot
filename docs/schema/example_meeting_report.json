@@ -1,0 +1,52 @@
+{
+  "subject": "Совещание по фундаментам ЖК Северный",
+  "date": "2026-04-25",
+  "duration": "1h 5m",
+  "location": "Microsoft Teams",
+  "project": "ЖК Северный",
+  "transcript_url": null,
+  "previous_protocol_url": null,
+  "participants": [
+    { "organization": "Eneca", "name": "Иван Петров", "role": "Инженер-конструктор" },
+    { "organization": null, "name": "Мария Сидорова", "role": null }
+  ],
+  "preview_summary": "Обсудили тип свай. Решено использовать буронабивные.",
+  "discussion_items": [
+    {
+      "topic": "Тип свай",
+      "outcome": "Решено использовать буронабивные — экономия 20%; Иван готовит спецификацию",
+      "responsible": "Иван Петров",
+      "deadline": "пятница",
+      "status": "Новый"
+    },
+    {
+      "topic": "Сроки поставки арматуры",
+      "outcome": "Обсудили; решения не принято",
+      "responsible": null,
+      "deadline": null,
+      "status": "Новый"
+    }
+  ],
+  "open_questions": [
+    {
+      "question": "Готовы ли результаты испытаний грунта?",
+      "responsible": "Мария Сидорова",
+      "deadline": "среда",
+      "comment": "Нужны до начала работ"
+    }
+  ],
+  "risks": [
+    {
+      "risk": "Задержка поставки арматуры",
+      "cause": "Дефицит у поставщика",
+      "consequences": "Сдвиг графика на 2 недели",
+      "responsible": "Иван Петров",
+      "mitigation": "Подключить резервного поставщика"
+    }
+  ],
+  "author": {
+    "organization": "Eneca",
+    "name": "Иван Петров",
+    "role": "Инженер-конструктор"
+  }
+}

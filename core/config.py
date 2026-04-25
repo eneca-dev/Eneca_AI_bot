@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     supabase_chat_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_KEY")  # ANON_KEY for Realtime subscriptions
     supabase_chat_service_key: Optional[str] = Field(None, alias="SUPABASE_CHAT_SERVICE_KEY")  # Bypasses RLS for bot writes
 
+    # Meetings Supabase - for meeting_reports (separate project)
+    supabase_meetings_url: Optional[str] = Field(None, alias="SUPABASE_MEETINGS_URL")
+    supabase_meetings_service_key: Optional[str] = Field(None, alias="SUPABASE_MEETINGS_SERVICE_KEY")
+
     # Microsoft Bot Framework Configuration
     microsoft_app_id: Optional[str] = Field(None, alias="MICROSOFT_APP_ID")
     microsoft_app_password: Optional[str] = Field(None, alias="MICROSOFT_APP_PASSWORD")
