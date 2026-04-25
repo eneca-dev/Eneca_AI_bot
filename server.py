@@ -14,6 +14,8 @@ from agents.teams_agent import (
 from services.teams_sender import teams_sender, format_report_as_text
 from services.recall_client import recall_client
 from services.whisper_transcriber import whisper_transcriber
+from services.graph_client import graph_client
+from database.meetings_client import meetings_db_client
 from core.config import settings
 from loguru import logger
 import uuid
@@ -172,12 +174,32 @@ MEETING_URL_PATTERNS = [
 ]
 
 
-def _build_author_from_conversation(conversation_id: Optional[str]) -> Optional[Author]:
+def _persist_meeting_report(
+    report: MeetingReport,
+    meeting: MeetingTranscript,
+    recall_bot_id: Optional[str] = None,
+) -> None:
+    """Persist a generated report to the meetings Supabase project.
+
+    Failures are logged but never propagate — sending the report to Teams is the
+    primary success path.
+    """
+    try:
+        meetings_db_client.upsert_meeting_report(
+            report=report.model_dump(),
+            transcript=meeting.model_dump(),
+            recall_bot_id=recall_bot_id,
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error while persisting meeting report: {e}")
+
+
+async def _build_author_from_conversation(conversation_id: Optional[str]) -> Optional[Author]:
     """Build a protocol Author from the stored Teams conversation reference.
 
-    Returns None when no conversation is known; callers fall back to DEFAULT_AUTHOR.
-    Organization and role are not provided by Teams/Bot Framework without extra
-    Graph API calls, so they stay empty in this iteration.
+    Enriches with jobTitle / companyName from Microsoft Graph when an
+    aadObjectId is known. Returns None when no conversation is known —
+    callers fall back to DEFAULT_AUTHOR.
     """
     if not conversation_id:
         return None
@@ -187,7 +209,22 @@ def _build_author_from_conversation(conversation_id: Optional[str]) -> Optional[
     user_name = ref.get("user_name")
     if not user_name:
         return None
-    return Author(organization=None, name=user_name, role=None)
+
+    organization: Optional[str] = None
+    role: Optional[str] = None
+
+    aad_object_id = ref.get("user_aad_object_id")
+    if aad_object_id:
+        profile = await graph_client.get_user_profile(aad_object_id)
+        if profile:
+            organization = profile.get("companyName")
+            role = profile.get("jobTitle")
+            # Prefer the Graph displayName if it's richer than what Teams gave us
+            graph_name = profile.get("displayName")
+            if graph_name:
+                user_name = graph_name
+
+    return Author(organization=organization, name=user_name, role=role)
 
 
 def extract_meeting_url(text: str) -> Optional[str]:
@@ -554,7 +591,7 @@ async def teams_process_meeting(
 
         agent_instance = get_teams_agent()
 
-        author = _build_author_from_conversation(request.teams_conversation_id)
+        author = await _build_author_from_conversation(request.teams_conversation_id)
 
         loop = asyncio.get_event_loop()
         report = await loop.run_in_executor(
@@ -564,6 +601,8 @@ async def teams_process_meeting(
         logger.info(f"Meeting report generated: {len(report.discussion_items)} discussion items, "
                      f"{len(report.open_questions)} open questions, "
                      f"{len(report.risks)} risks")
+
+        _persist_meeting_report(report, request.meeting, recall_bot_id=None)
 
         # Send report to Teams if configured and requested
         teams_sent = False
@@ -812,8 +851,38 @@ async def _process_recording_with_whisper(bot_id: str):
     Background task: download video from Recall, transcribe with Whisper,
     enrich with speaker names from Recall speaker_timeline,
     process with TeamsAgent, send report to Teams.
+
+    DB lifecycle:
+      start_meeting_processing(bot_id) -> status='processing'
+      complete_meeting_report(bot_id, ...)   on success -> status='done'
+      mark_meeting_error(bot_id, str(e))     on failure -> status='error'
     """
     conversation_id = recall_client.get_conversation_for_bot(bot_id)
+
+    # Best-effort: pull subject + date from Recall now so the 'processing'
+    # row in the dashboard is immediately recognisable. Failure is fine —
+    # the row is still inserted with NULLs and filled in on completion.
+    initial_subject: Optional[str] = None
+    initial_date: Optional[str] = None
+    try:
+        early_bot_data = await recall_client.get_bot_status(bot_id)
+        early_meta = (
+            early_bot_data.get("recordings", [{}])[0]
+            .get("media_shortcuts", {})
+            .get("meeting_metadata", {})
+            .get("data", {})
+        )
+        initial_subject = early_meta.get("title") or None
+        join_at = early_bot_data.get("join_at")
+        initial_date = join_at[:10] if join_at else None
+    except Exception as e:
+        logger.warning(f"Could not fetch initial Recall metadata for bot {bot_id}: {e}")
+
+    meetings_db_client.start_meeting_processing(
+        recall_bot_id=bot_id,
+        subject=initial_subject,
+        meeting_date=initial_date,
+    )
 
     try:
         logger.info(f"Processing recording for bot {bot_id} via Whisper")
@@ -941,7 +1010,7 @@ async def _process_recording_with_whisper(bot_id: str):
 
         # 4. Process with TeamsAgent
         agent_instance = get_teams_agent()
-        author = _build_author_from_conversation(conversation_id)
+        author = await _build_author_from_conversation(conversation_id)
         report = await loop.run_in_executor(
             None, agent_instance.process_meeting, meeting, author
         )
@@ -950,6 +1019,12 @@ async def _process_recording_with_whisper(bot_id: str):
                      f"{len(report.discussion_items)} discussion items, "
                      f"{len(report.open_questions)} open questions, "
                      f"{len(report.risks)} risks")
+
+        meetings_db_client.complete_meeting_report(
+            recall_bot_id=bot_id,
+            report=report.model_dump(),
+            transcript=meeting.model_dump(),
+        )
 
         # 5. Send report to Teams
         if conversation_id and teams_sender.is_configured:
@@ -969,6 +1044,7 @@ async def _process_recording_with_whisper(bot_id: str):
     except Exception as e:
         logger.error(f"Error processing recording for bot {bot_id}: {e}",
                      exc_info=True)
+        meetings_db_client.mark_meeting_error(bot_id, str(e))
         if conversation_id and teams_sender.is_configured:
             try:
                 await teams_sender.send_message(
