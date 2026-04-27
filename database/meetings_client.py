@@ -112,8 +112,19 @@ class MeetingsDBClient:
         recall_bot_id: str,
         report: Dict[str, Any],
         transcript: Optional[Dict[str, Any]] = None,
+        costs: Optional[Dict[str, Optional[float]]] = None,
+        urls: Optional[Dict[str, Optional[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Mark a meeting as done and store the generated report and transcript.
+
+        Args:
+            recall_bot_id: id of the Recall bot that produced the recording.
+            report: MeetingReport.model_dump()
+            transcript: MeetingTranscript.model_dump() (optional)
+            costs: dict with optional keys `llm_cost_usd`, `whisper_cost_usd`,
+                `recall_cost_usd` (each may be None when not measured).
+            urls: dict with optional keys `protocol_docx_url`,
+                `transcript_docx_url` (each may be None when upload failed).
 
         If the row was never created via `start_meeting_processing` (defensive
         path — e.g. processing-row insert silently failed), falls back to a
@@ -123,6 +134,9 @@ class MeetingsDBClient:
             logger.warning("Meetings DB client unavailable — skipping complete_meeting_report")
             return None
 
+        costs = costs or {}
+        urls = urls or {}
+
         update_row = {
             "status": STATUS_DONE,
             "subject": report.get("subject"),
@@ -130,6 +144,11 @@ class MeetingsDBClient:
             "report": report,
             "transcript": transcript,
             "error_message": None,
+            "llm_cost_usd": costs.get("llm_cost_usd"),
+            "whisper_cost_usd": costs.get("whisper_cost_usd"),
+            "recall_cost_usd": costs.get("recall_cost_usd"),
+            "protocol_docx_url": urls.get("protocol_docx_url"),
+            "transcript_docx_url": urls.get("transcript_docx_url"),
         }
 
         try:
@@ -143,7 +162,8 @@ class MeetingsDBClient:
                 saved = response.data[0]
                 logger.info(
                     f"Meeting report completed: id={saved.get('id')}, "
-                    f"recall_bot_id={recall_bot_id}"
+                    f"recall_bot_id={recall_bot_id}, "
+                    f"costs={costs}"
                 )
                 return saved
 
@@ -156,6 +176,8 @@ class MeetingsDBClient:
                 transcript=transcript,
                 recall_bot_id=recall_bot_id,
                 status=STATUS_DONE,
+                costs=costs,
+                urls=urls,
             )
         except Exception as e:
             logger.error(
@@ -225,6 +247,8 @@ class MeetingsDBClient:
         transcript: Optional[Dict[str, Any]] = None,
         recall_bot_id: Optional[str] = None,
         status: str = STATUS_DONE,
+        costs: Optional[Dict[str, Optional[float]]] = None,
+        urls: Optional[Dict[str, Optional[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Persist a meeting report in one shot (no separate processing phase).
 
@@ -235,6 +259,9 @@ class MeetingsDBClient:
             logger.warning("Meetings DB client unavailable — skipping persistence")
             return None
 
+        costs = costs or {}
+        urls = urls or {}
+
         row = {
             "recall_bot_id": recall_bot_id,
             "status": status,
@@ -242,6 +269,11 @@ class MeetingsDBClient:
             "meeting_date": report.get("date"),
             "report": report,
             "transcript": transcript,
+            "llm_cost_usd": costs.get("llm_cost_usd"),
+            "whisper_cost_usd": costs.get("whisper_cost_usd"),
+            "recall_cost_usd": costs.get("recall_cost_usd"),
+            "protocol_docx_url": urls.get("protocol_docx_url"),
+            "transcript_docx_url": urls.get("transcript_docx_url"),
         }
 
         try:

@@ -106,10 +106,18 @@ def _scenario_happy(meetings_db_client, today: str, recall_bot_id: str) -> bool:
     ok2 = _check(row is not None and row.get("report") is None,
                  "report is NULL during processing")
 
+    fake_costs = {"llm_cost_usd": 0.02, "whisper_cost_usd": 0.36, "recall_cost_usd": 0.50}
+    fake_urls = {
+        "protocol_docx_url": f"https://example.test/{recall_bot_id}/protocol.docx",
+        "transcript_docx_url": f"https://example.test/{recall_bot_id}/transcript.docx",
+    }
+
     completed = meetings_db_client.complete_meeting_report(
         recall_bot_id=recall_bot_id,
         report=_sample_report(today),
         transcript=_sample_transcript(today),
+        costs=fake_costs,
+        urls=fake_urls,
     )
     ok3 = _check(completed is not None and completed.get("status") == "done",
                  f"status='done' after complete (got {completed and completed.get('status')!r})")
@@ -121,8 +129,32 @@ def _scenario_happy(meetings_db_client, today: str, recall_bot_id: str) -> bool:
                  "transcript is filled after complete")
     ok6 = _check(row2 is not None and row2.get("error_message") is None,
                  "error_message stays NULL on success")
+    ok7 = _check(
+        row2 is not None and float(row2.get("llm_cost_usd") or 0) == 0.02,
+        f"llm_cost_usd persisted (got {row2 and row2.get('llm_cost_usd')!r})",
+    )
+    ok8 = _check(
+        row2 is not None and float(row2.get("whisper_cost_usd") or 0) == 0.36,
+        f"whisper_cost_usd persisted (got {row2 and row2.get('whisper_cost_usd')!r})",
+    )
+    ok9 = _check(
+        row2 is not None and float(row2.get("recall_cost_usd") or 0) == 0.50,
+        f"recall_cost_usd persisted (got {row2 and row2.get('recall_cost_usd')!r})",
+    )
+    ok10 = _check(
+        row2 is not None and abs(float(row2.get("total_cost_usd") or 0) - 0.88) < 0.01,
+        f"total_cost_usd auto-computed (got {row2 and row2.get('total_cost_usd')!r}, expected ~0.88)",
+    )
+    ok11 = _check(
+        row2 is not None and row2.get("protocol_docx_url") == fake_urls["protocol_docx_url"],
+        "protocol_docx_url persisted",
+    )
+    ok12 = _check(
+        row2 is not None and row2.get("transcript_docx_url") == fake_urls["transcript_docx_url"],
+        "transcript_docx_url persisted",
+    )
 
-    return all([ok1, ok2, ok3, ok4, ok5, ok6])
+    return all([ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12])
 
 
 def _scenario_fail(meetings_db_client, today: str, recall_bot_id: str) -> bool:

@@ -12,7 +12,7 @@ Caller-supplied metadata (author, location, transcript_url, previous_protocol_ur
 is attached after the LLM call so the model cannot hallucinate it.
 """
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, ConfigDict
 from agents.base import BaseAgent
 from core.config import settings
@@ -135,7 +135,10 @@ class TeamsAgent(BaseAgent):
 
         # LLM returns the subset of fields it is responsible for;
         # caller-supplied metadata (author, location, urls, date, duration) is attached afterwards.
-        self.report_llm = self.llm.with_structured_output(LLMMeetingReport)
+        # include_raw=True: also returns the AIMessage so we can read usage_metadata for cost tracking.
+        self.report_llm = self.llm.with_structured_output(
+            LLMMeetingReport, include_raw=True
+        )
 
         logger.info(f"TeamsAgent initialized with model {model}")
 
@@ -182,12 +185,17 @@ class TeamsAgent(BaseAgent):
         self,
         meeting: MeetingTranscript,
         author: Optional[Author] = None,
-    ) -> MeetingReport:
+    ) -> Tuple[MeetingReport, Dict[str, int]]:
         """Transcript → structured protocol aligned with the Eneca template.
 
         Args:
             meeting: Validated meeting transcript.
             author: Protocol author. Defaults to the Eneca meeting bot.
+
+        Returns:
+            Tuple of (MeetingReport, llm_usage). `llm_usage` is the
+            `usage_metadata` dict from LangChain (`input_tokens`,
+            `output_tokens`, `total_tokens`); empty dict on failure.
         """
         logger.info(f"Processing meeting: '{meeting.title}', {len(meeting.transcript)} segments")
 
@@ -206,7 +214,17 @@ class TeamsAgent(BaseAgent):
                 )),
             ]
 
-            llm_report: LLMMeetingReport = self.report_llm.invoke(messages)
+            # include_raw=True returns dict {"raw": AIMessage, "parsed": LLMMeetingReport, ...}
+            result = self.report_llm.invoke(messages)
+            parsing_error = result.get("parsing_error")
+            if parsing_error:
+                raise parsing_error
+            llm_report: LLMMeetingReport = result["parsed"]
+            raw_msg = result.get("raw")
+            usage: Dict[str, int] = {}
+            if raw_msg is not None:
+                # LangChain exposes token counts on AIMessage.usage_metadata
+                usage = getattr(raw_msg, "usage_metadata", None) or {}
 
             report = MeetingReport(
                 subject=llm_report.subject,
@@ -228,13 +246,14 @@ class TeamsAgent(BaseAgent):
             logger.info(
                 f"Report generated: {len(report.discussion_items)} discussion items, "
                 f"{len(report.open_questions)} open questions, {len(report.risks)} risks"
+                f" | LLM usage: input={usage.get('input_tokens')}, output={usage.get('output_tokens')}"
             )
 
-            return report
+            return report, usage
 
         except Exception as e:
             logger.error(f"Error processing meeting: {e}")
-            return MeetingReport(
+            fallback = MeetingReport(
                 subject=meeting.title,
                 date=meeting.date,
                 duration=meeting.duration,
@@ -249,13 +268,14 @@ class TeamsAgent(BaseAgent):
                 previous_protocol_url=None,
                 author=author,
             )
+            return fallback, {}
 
     def process_meeting_raw(
         self,
         meeting_json: dict,
         author: Optional[Author] = None,
     ) -> dict:
-        """Convenience: dict in, dict out."""
+        """Convenience: dict in, dict out (does not expose usage)."""
         meeting = MeetingTranscript(**meeting_json)
-        report = self.process_meeting(meeting, author=author)
+        report, _usage = self.process_meeting(meeting, author=author)
         return report.model_dump()
