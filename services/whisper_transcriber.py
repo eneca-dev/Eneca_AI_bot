@@ -67,13 +67,10 @@ class WhisperTranscriber:
         logger.info(f"Audio extracted: {audio_path} ({file_size:.1f} MB)")
         return audio_path
 
-    def _split_audio(self, audio_path: str) -> list[str]:
-        """Split audio file into chunks using ffmpeg."""
+    def _get_audio_duration_seconds(self, audio_path: str) -> Optional[float]:
+        """Probe audio duration via ffprobe. Returns None if ffprobe is unavailable or fails."""
         if not self._ffmpeg_available():
-            logger.warning("ffmpeg not found, cannot split audio")
-            return [audio_path]
-
-        # Get audio duration
+            return None
         cmd = [
             "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
@@ -83,9 +80,21 @@ class WhisperTranscriber:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(f"ffprobe error: {result.stderr}")
+            return None
+        try:
+            return float(result.stdout.strip())
+        except (ValueError, AttributeError):
+            return None
+
+    def _split_audio(self, audio_path: str) -> list[str]:
+        """Split audio file into chunks using ffmpeg."""
+        if not self._ffmpeg_available():
+            logger.warning("ffmpeg not found, cannot split audio")
             return [audio_path]
 
-        total_duration = float(result.stdout.strip())
+        total_duration = self._get_audio_duration_seconds(audio_path)
+        if total_duration is None:
+            return [audio_path]
         logger.info(f"Audio duration: {total_duration:.0f}s ({total_duration/60:.1f} min)")
 
         if total_duration <= self.CHUNK_DURATION_SEC:
@@ -166,14 +175,23 @@ class WhisperTranscriber:
             language: Language code (default: "ru" for Russian)
 
         Returns:
-            Dict with segments and full_text
+            Dict with `segments`, `full_text` and `audio_seconds`
+            (audio_seconds may be None if ffprobe is unavailable; in that
+             case callers should fall back to the last segment's end time).
         """
         # Extract audio if it's a video file
         if file_path.endswith(".mp4"):
             file_path = self.extract_audio(file_path)
 
+        # Probe duration BEFORE transcription/cleanup. Used for billing.
+        audio_seconds = self._get_audio_duration_seconds(file_path)
+
         file_size = Path(file_path).stat().st_size / (1024 * 1024)
-        logger.info(f"Transcribing {file_path} ({file_size:.1f} MB), language={language}")
+        logger.info(
+            f"Transcribing {file_path} ({file_size:.1f} MB, "
+            f"~{audio_seconds:.0f}s)" if audio_seconds is not None
+            else f"Transcribing {file_path} ({file_size:.1f} MB)"
+        )
 
         # If file is small enough, transcribe directly
         if file_size <= self.MAX_FILE_SIZE_MB:
@@ -181,7 +199,13 @@ class WhisperTranscriber:
             logger.info(f"Whisper transcription complete: {len(segments)} segments, "
                         f"full text length: {len(full_text)}")
             self._cleanup(file_path)
-            return {"segments": segments, "full_text": full_text}
+            if audio_seconds is None and segments:
+                audio_seconds = segments[-1].get("end_sec")
+            return {
+                "segments": segments,
+                "full_text": full_text,
+                "audio_seconds": audio_seconds,
+            }
 
         # Large file — split into chunks
         logger.info(f"File too large ({file_size:.1f} MB > {self.MAX_FILE_SIZE_MB} MB), splitting into chunks")
@@ -211,7 +235,14 @@ class WhisperTranscriber:
         # Clean up original audio file
         self._cleanup(file_path)
 
-        return {"segments": all_segments, "full_text": full_text}
+        if audio_seconds is None and all_segments:
+            audio_seconds = all_segments[-1].get("end_sec")
+
+        return {
+            "segments": all_segments,
+            "full_text": full_text,
+            "audio_seconds": audio_seconds,
+        }
 
     def _cleanup(self, file_path: str):
         """Remove temp file if it's an mp3."""

@@ -278,7 +278,51 @@ def test_upsert_row_contains_only_schema_columns():
         recall_bot_id="bot-1",
     )
     row = table_mock.upsert.call_args[0][0]
-    assert set(row.keys()) == {"recall_bot_id", "status", "subject", "meeting_date", "report", "transcript"}
+    assert set(row.keys()) == {
+        "recall_bot_id", "status", "subject", "meeting_date", "report", "transcript",
+        "llm_cost_usd", "whisper_cost_usd", "recall_cost_usd",
+        "protocol_docx_url", "transcript_docx_url",
+    }
+
+
+def test_upsert_includes_costs_and_urls_when_provided():
+    client, _, table_mock = _make_client_with_mock(upsert_response=[{"id": "abc"}])
+    client.upsert_meeting_report(
+        report=_sample_report_dict(),
+        transcript=None,
+        recall_bot_id="bot-1",
+        costs={"llm_cost_usd": 0.02, "whisper_cost_usd": 0.36, "recall_cost_usd": 0.50},
+        urls={
+            "protocol_docx_url": "https://x/p.docx",
+            "transcript_docx_url": "https://x/t.docx",
+        },
+    )
+    row = table_mock.upsert.call_args[0][0]
+    assert row["llm_cost_usd"] == 0.02
+    assert row["whisper_cost_usd"] == 0.36
+    assert row["recall_cost_usd"] == 0.50
+    assert row["protocol_docx_url"] == "https://x/p.docx"
+    assert row["transcript_docx_url"] == "https://x/t.docx"
+
+
+def test_complete_meeting_report_passes_costs_and_urls():
+    client, _, table_mock = _make_client_with_mock(update_response=[{"id": "row-1"}])
+    client.complete_meeting_report(
+        recall_bot_id="bot-1",
+        report=_sample_report_dict(),
+        transcript=_sample_transcript_dict(),
+        costs={"llm_cost_usd": 0.02, "whisper_cost_usd": 0.36, "recall_cost_usd": 0.50},
+        urls={
+            "protocol_docx_url": "https://x/p.docx",
+            "transcript_docx_url": "https://x/t.docx",
+        },
+    )
+    update_row = table_mock.update.call_args[0][0]
+    assert update_row["llm_cost_usd"] == 0.02
+    assert update_row["whisper_cost_usd"] == 0.36
+    assert update_row["recall_cost_usd"] == 0.50
+    assert update_row["protocol_docx_url"] == "https://x/p.docx"
+    assert update_row["transcript_docx_url"] == "https://x/t.docx"
 
 
 # --- Read ---

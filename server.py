@@ -15,6 +15,9 @@ from services.teams_sender import teams_sender, format_report_as_text
 from services.recall_client import recall_client
 from services.whisper_transcriber import whisper_transcriber
 from services.graph_client import graph_client
+from services.docx_renderer import render_report_docx, render_transcript_docx
+from services.storage_client import storage_client
+from services import cost_calculator
 from database.meetings_client import meetings_db_client
 from core.config import settings
 from loguru import logger
@@ -594,7 +597,7 @@ async def teams_process_meeting(
         author = await _build_author_from_conversation(request.teams_conversation_id)
 
         loop = asyncio.get_event_loop()
-        report = await loop.run_in_executor(
+        report, _llm_usage = await loop.run_in_executor(
             None, agent_instance.process_meeting, request.meeting, author
         )
 
@@ -906,7 +909,11 @@ async def _process_recording_with_whisper(bot_id: str):
         )
 
         segments = whisper_result.get("segments", [])
-        logger.info(f"Whisper transcription: {len(segments)} segments")
+        audio_seconds = whisper_result.get("audio_seconds")
+        logger.info(
+            f"Whisper transcription: {len(segments)} segments, "
+            f"audio_seconds={audio_seconds}"
+        )
 
         if not segments:
             raise ValueError("Whisper returned 0 segments — no speech detected")
@@ -1011,7 +1018,7 @@ async def _process_recording_with_whisper(bot_id: str):
         # 4. Process with TeamsAgent
         agent_instance = get_teams_agent()
         author = await _build_author_from_conversation(conversation_id)
-        report = await loop.run_in_executor(
+        report, llm_usage = await loop.run_in_executor(
             None, agent_instance.process_meeting, meeting, author
         )
 
@@ -1020,21 +1027,65 @@ async def _process_recording_with_whisper(bot_id: str):
                      f"{len(report.open_questions)} open questions, "
                      f"{len(report.risks)} risks")
 
+        # 5. Cost calculation. Recall bills for recording duration; we use
+        # audio_seconds from Whisper as a close-enough proxy (Recall records
+        # the full meeting, same minute count in practice).
+        costs = {
+            "llm_cost_usd": cost_calculator.llm_cost_usd(
+                llm_usage.get("input_tokens"),
+                llm_usage.get("output_tokens"),
+            ),
+            "whisper_cost_usd": cost_calculator.whisper_cost_usd(audio_seconds),
+            "recall_cost_usd": cost_calculator.recall_cost_usd(audio_seconds),
+        }
+        logger.info(f"Costs for bot {bot_id}: {costs}")
+
+        # 6. Render DOCX artifacts and upload to Supabase Storage.
+        # Both are best-effort — failure here doesn't block Teams delivery.
+        urls = {"protocol_docx_url": None, "transcript_docx_url": None}
+        try:
+            protocol_bytes = await loop.run_in_executor(
+                None, render_report_docx, report
+            )
+            transcript_bytes = await loop.run_in_executor(
+                None, render_transcript_docx, meeting
+            )
+            urls["protocol_docx_url"] = await loop.run_in_executor(
+                None, storage_client.upload_meeting_artifact,
+                bot_id, "protocol.docx", protocol_bytes,
+            )
+            urls["transcript_docx_url"] = await loop.run_in_executor(
+                None, storage_client.upload_meeting_artifact,
+                bot_id, "transcript.docx", transcript_bytes,
+            )
+            logger.info(f"DOCX artifacts uploaded: {urls}")
+        except Exception as e:
+            logger.error(f"Failed to render or upload DOCX artifacts for bot {bot_id}: {e}")
+
+        # 7. Persist with costs + urls.
         meetings_db_client.complete_meeting_report(
             recall_bot_id=bot_id,
             report=report.model_dump(),
             transcript=meeting.model_dump(),
+            costs=costs,
+            urls=urls,
         )
 
-        # 5. Send report to Teams
+        # 8. Send report to Teams (text + DOCX links).
         if conversation_id and teams_sender.is_configured:
             report_text = format_report_as_text(report)
-            await teams_sender.send_message(conversation_id, report_text)
+            links_lines = []
+            if urls["protocol_docx_url"]:
+                links_lines.append(f"📄 Протокол (DOCX): {urls['protocol_docx_url']}")
+            if urls["transcript_docx_url"]:
+                links_lines.append(f"📝 Транскрипт (DOCX): {urls['transcript_docx_url']}")
+            full_message = report_text + ("\n\n" + "\n".join(links_lines) if links_lines else "")
+            await teams_sender.send_message(conversation_id, full_message)
             logger.info(f"Report sent to Teams conversation {conversation_id}")
         else:
             logger.warning(f"No Teams conversation mapped for bot {bot_id}")
 
-        # 6. Clean up temp video file
+        # 9. Clean up temp video file
         import os
         try:
             os.remove(video_path)

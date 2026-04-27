@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # Meetings Supabase - for meeting_reports (separate project)
     supabase_meetings_url: Optional[str] = Field(None, alias="SUPABASE_MEETINGS_URL")
     supabase_meetings_service_key: Optional[str] = Field(None, alias="SUPABASE_MEETINGS_SERVICE_KEY")
+    supabase_meetings_bucket: str = Field("meeting-protocols", alias="SUPABASE_MEETINGS_BUCKET")
+
+    # Pricing (USD) — used by services/cost_calculator.py
+    price_llm_input_per_1m_usd: float = Field(0.75, alias="PRICE_LLM_INPUT_PER_1M_USD")
+    price_llm_output_per_1m_usd: float = Field(4.50, alias="PRICE_LLM_OUTPUT_PER_1M_USD")
+    price_whisper_per_min_usd: float = Field(0.006, alias="PRICE_WHISPER_PER_MIN_USD")
+    price_recall_per_hour_usd: float = Field(0.50, alias="PRICE_RECALL_PER_HOUR_USD")
 
     # Microsoft Bot Framework Configuration
     microsoft_app_id: Optional[str] = Field(None, alias="MICROSOFT_APP_ID")
