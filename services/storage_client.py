@@ -1,8 +1,10 @@
 """Supabase Storage client for meeting artifacts (DOCX files).
 
 The bucket configured via SUPABASE_MEETINGS_BUCKET (default `meeting-protocols`)
-must exist as a **public** bucket — created once via the Supabase Dashboard
-(Storage → New bucket → Public ON).
+holds the protocol and transcript DOCX files. The bucket can be private —
+we hand back time-limited **signed URLs** (TTL from
+`SUPABASE_SIGNED_URL_TTL_SECONDS`, default 30 days), so anyone with the link
+can download until the token expires.
 
 Uploads are namespaced by Recall bot id, so a single recording can have
 multiple artifacts (`<bot_id>/protocol.docx`, `<bot_id>/transcript.docx`).
@@ -76,9 +78,11 @@ class StorageClient:
             return None
 
         path = f"{recall_bot_id}/{filename}"
+        ttl = settings.supabase_signed_url_ttl_seconds
 
         try:
-            self.client.storage.from_(self.bucket).upload(
+            bucket = self.client.storage.from_(self.bucket)
+            bucket.upload(
                 path=path,
                 file=content_bytes,
                 file_options={
@@ -86,14 +90,22 @@ class StorageClient:
                     "upsert": "true",
                 },
             )
-            public_url = (
-                self.client.storage.from_(self.bucket).get_public_url(path)
-            )
+            signed = bucket.create_signed_url(path, ttl)
+            # supabase-py returns {"signedURL": ..., "signedUrl": ...}; both
+            # carry the same URL but tolerate either, in case future versions
+            # drop one alias.
+            url = (signed or {}).get("signedURL") or (signed or {}).get("signedUrl")
+            if not url:
+                logger.error(
+                    f"create_signed_url returned no URL for {self.bucket}/{path}: {signed!r}"
+                )
+                return None
+            url = url.rstrip("?")
             logger.info(
                 f"Uploaded artifact: bucket={self.bucket} path={path} "
-                f"size={len(content_bytes)}"
+                f"size={len(content_bytes)} ttl={ttl}s"
             )
-            return public_url
+            return url
         except Exception as e:
             logger.error(
                 f"Failed to upload artifact {self.bucket}/{path}: {e}"

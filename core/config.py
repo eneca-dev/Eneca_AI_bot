@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     supabase_meetings_url: Optional[str] = Field(None, alias="SUPABASE_MEETINGS_URL")
     supabase_meetings_service_key: Optional[str] = Field(None, alias="SUPABASE_MEETINGS_SERVICE_KEY")
     supabase_meetings_bucket: str = Field("meeting-protocols", alias="SUPABASE_MEETINGS_BUCKET")
+    # TTL for signed Storage URLs handed back to Teams (seconds). After this
+    # the link returns 401 — file remains in the bucket. Default: 30 days.
+    supabase_signed_url_ttl_seconds: int = Field(60 * 60 * 24 * 30, alias="SUPABASE_SIGNED_URL_TTL_SECONDS")
 
     # Pricing (USD) — used by services/cost_calculator.py
     price_llm_input_per_1m_usd: float = Field(0.75, alias="PRICE_LLM_INPUT_PER_1M_USD")

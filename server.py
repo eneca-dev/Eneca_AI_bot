@@ -12,7 +12,7 @@ from agents.teams_agent import (
     MeetingParticipant, TranscriptSegment, Author,
 )
 from services.teams_sender import teams_sender, format_report_as_text
-from services.recall_client import recall_client
+from services.recall_client import recall_client, MeetingAlreadyJoinedError
 from services.whisper_transcriber import whisper_transcriber
 from services.graph_client import graph_client
 from services.docx_renderer import render_report_docx, render_transcript_docx
@@ -248,6 +248,48 @@ def extract_meeting_url(text: str) -> Optional[str]:
         if match:
             return match.group(0).rstrip('.,;:!?)')
     return None
+
+
+def _iter_strings(obj):
+    """Yield every string value reachable inside obj (dict/list/str/scalar)."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
+def _format_artifact_links(urls: dict) -> str:
+    """Render DOCX artifact URLs as Teams-friendly markdown links.
+
+    Returns either an empty string (nothing to render) or a block ready to be
+    appended after the report text. Labels intentionally avoid parentheses so
+    the Teams markdown parser does not confuse them with link syntax.
+    """
+    lines = []
+    if urls and urls.get("protocol_docx_url"):
+        lines.append(f"[📄 Протокол DOCX]({urls['protocol_docx_url']})")
+    if urls and urls.get("transcript_docx_url"):
+        lines.append(f"[📝 Транскрипт DOCX]({urls['transcript_docx_url']})")
+    return "\n".join(lines)
+
+
+def extract_meeting_url_from_activity(activity: Optional[dict]) -> Optional[str]:
+    """Extract a meeting URL from anywhere in a Bot Framework activity payload.
+
+    When a user pastes a link with anchor text ("Созвон с Артемом | Meeting-Join")
+    Teams keeps only the display label in `activity.text` and stashes the real
+    URL inside `attachments[*].content.tap.value` (HeroCard) or similar nested
+    fields. Walking all string values catches every layout — HeroCard,
+    AdaptiveCard body items, button arrays — without hard-coding the schema.
+    """
+    if not activity:
+        return None
+    haystack = " ".join(_iter_strings(activity))
+    return extract_meeting_url(haystack)
 
 
 @app.on_event("startup")
@@ -673,10 +715,10 @@ async def teams_messages_endpoint(request: Request):
             teams_sender.save_conversation_reference(activity)
 
             user_name = activity.get("from", {}).get("name", "пользователь")
-            text = activity.get("text", "").strip()
 
-            # Check for meeting links
-            meeting_url = extract_meeting_url(text)
+            # Check for meeting links anywhere in the payload — when Teams renders
+            # a pasted link with anchor text, the URL only lives inside attachments.
+            meeting_url = extract_meeting_url_from_activity(activity)
 
             if meeting_url:
                 logger.info(f"Meeting link detected from {user_name}: {meeting_url}")
@@ -696,6 +738,15 @@ async def teams_messages_endpoint(request: Request):
                             "По завершении пришлю протокол сюда."
                         )
                         logger.info(f"Recall bot {recall_bot_id} sent to {meeting_url}")
+                    except MeetingAlreadyJoinedError as e:
+                        logger.info(
+                            f"Duplicate join request from {user_name}: "
+                            f"bot {e.existing_bot_id} is already in this meeting"
+                        )
+                        reply_text = (
+                            "Ассистент уже на этой встрече. "
+                            "Протокол придёт сюда после её окончания."
+                        )
                     except Exception as e:
                         logger.error(f"Failed to send Recall bot: {e}")
                         reply_text = f"Не удалось отправить ассистента на встречу: {e}"
@@ -820,9 +871,12 @@ async def recall_webhook(request: Request):
         elif event == "transcript.done":
             logger.info(f"Recall transcript.done for bot {bot_id} (ignored, using Whisper)")
 
-        # Handle bot.done — just log
+        # Handle bot.done — log and release the meeting lock so a follow-up
+        # meeting on the same URL is not blocked.
         elif event == "bot.done":
             logger.info(f"Bot {bot_id} done")
+            if bot_id:
+                recall_client.release_meeting_lock(bot_id)
 
         # Handle fatal errors
         elif event == "bot.status_change":
@@ -832,6 +886,8 @@ async def recall_webhook(request: Request):
 
             if code == "fatal":
                 logger.error(f"Recall bot {bot_id} failed: {status}")
+                if bot_id:
+                    recall_client.release_meeting_lock(bot_id)
                 conversation_id = recall_client.get_conversation_for_bot(bot_id)
                 if conversation_id:
                     try:
@@ -1074,12 +1130,8 @@ async def _process_recording_with_whisper(bot_id: str):
         # 8. Send report to Teams (text + DOCX links).
         if conversation_id and teams_sender.is_configured:
             report_text = format_report_as_text(report)
-            links_lines = []
-            if urls["protocol_docx_url"]:
-                links_lines.append(f"📄 Протокол (DOCX): {urls['protocol_docx_url']}")
-            if urls["transcript_docx_url"]:
-                links_lines.append(f"📝 Транскрипт (DOCX): {urls['transcript_docx_url']}")
-            full_message = report_text + ("\n\n" + "\n".join(links_lines) if links_lines else "")
+            links_block = _format_artifact_links(urls)
+            full_message = report_text + (f"\n\n{links_block}" if links_block else "")
             await teams_sender.send_message(conversation_id, full_message)
             logger.info(f"Report sent to Teams conversation {conversation_id}")
         else:
