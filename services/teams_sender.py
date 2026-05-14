@@ -230,6 +230,19 @@ def _val(v) -> str:
     return s if s else _DASH
 
 
+def _teams_join(lines: list) -> str:
+    """Join lines so Teams Markdown renders each on its own visual line.
+
+    Teams treats a single `\\n` as a soft break (i.e. a space), so the
+    naive `'\\n'.join(...)` collapses every list of fields into one paragraph.
+    Appending two trailing spaces before the newline is the standard
+    Markdown hard-line-break syntax — Teams honours it. Empty strings stay
+    empty so they still produce paragraph breaks (`\\n\\n`).
+    """
+    rendered = [(line + "  ") if line else "" for line in lines]
+    return "\n".join(rendered)
+
+
 def _format_header(report) -> list:
     lines = [
         f"**Протокол совещания от {_val(report.date)}**",
@@ -256,7 +269,12 @@ def _format_header(report) -> list:
 
 
 def _format_numbered_section(title: str, items: list, render_item) -> list:
-    """Render a numbered section. `render_item(item)` returns a list of lines (without leading '1.')."""
+    """Render a numbered section. `render_item(item)` returns a list of lines (without leading '1.').
+
+    Items are separated by an empty line so Teams renders a visible
+    paragraph break between them — without it, all items merge into one
+    indistinguishable block.
+    """
     lines = ["", f"**{title}**"]
     if not items:
         lines.append(_EMPTY_SECTION)
@@ -265,6 +283,8 @@ def _format_numbered_section(title: str, items: list, render_item) -> list:
         item_lines = render_item(item)
         if not item_lines:
             continue
+        if i > 1:
+            lines.append("")  # paragraph break between items
         lines.append(f"{i}. {item_lines[0]}")
         for extra in item_lines[1:]:
             lines.append(f"   {extra}")
@@ -333,7 +353,7 @@ def format_report_as_text(report) -> str:
     ))
     lines.extend(_format_author(report.author))
 
-    return "\n".join(lines)
+    return _teams_join(lines)
 
 
 # Singleton instance

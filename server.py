@@ -181,6 +181,9 @@ def _persist_meeting_report(
     report: MeetingReport,
     meeting: MeetingTranscript,
     recall_bot_id: Optional[str] = None,
+    invited_by_aad_object_id: Optional[str] = None,
+    invited_by_name: Optional[str] = None,
+    meeting_started_at: Optional[str] = None,
 ) -> None:
     """Persist a generated report to the meetings Supabase project.
 
@@ -192,6 +195,9 @@ def _persist_meeting_report(
             report=report.model_dump(),
             transcript=meeting.model_dump(),
             recall_bot_id=recall_bot_id,
+            invited_by_aad_object_id=invited_by_aad_object_id,
+            invited_by_name=invited_by_name,
+            meeting_started_at=meeting_started_at,
         )
     except Exception as e:
         logger.error(f"Unexpected error while persisting meeting report: {e}")
@@ -638,6 +644,11 @@ async def teams_process_meeting(
 
         author = await _build_author_from_conversation(request.teams_conversation_id)
 
+        # Look up inviter from the Teams conversation, if any.
+        inviter_ref = teams_sender.get_conversation_reference(request.teams_conversation_id) if request.teams_conversation_id else None
+        invited_by_aad_object_id = (inviter_ref or {}).get("user_aad_object_id")
+        invited_by_name = (inviter_ref or {}).get("user_name")
+
         loop = asyncio.get_event_loop()
         report, _llm_usage = await loop.run_in_executor(
             None, agent_instance.process_meeting, request.meeting, author
@@ -647,7 +658,13 @@ async def teams_process_meeting(
                      f"{len(report.open_questions)} open questions, "
                      f"{len(report.risks)} risks")
 
-        _persist_meeting_report(report, request.meeting, recall_bot_id=None)
+        _persist_meeting_report(
+            report,
+            request.meeting,
+            recall_bot_id=None,
+            invited_by_aad_object_id=invited_by_aad_object_id,
+            invited_by_name=invited_by_name,
+        )
 
         # Send report to Teams if configured and requested
         teams_sent = False
@@ -714,7 +731,8 @@ async def teams_messages_endpoint(request: Request):
             # Save conversation reference for future proactive messages
             teams_sender.save_conversation_reference(activity)
 
-            user_name = activity.get("from", {}).get("name", "пользователь")
+            from_user = activity.get("from", {})
+            user_name = from_user.get("name", "пользователь")
 
             # Check for meeting links anywhere in the payload — when Teams renders
             # a pasted link with anchor text, the URL only lives inside attachments.
@@ -731,6 +749,8 @@ async def teams_messages_endpoint(request: Request):
                         result = await recall_client.join_meeting(
                             meeting_url=meeting_url,
                             teams_conversation_id=conversation_id,
+                            invited_by_aad_object_id=from_user.get("aadObjectId"),
+                            invited_by_name=from_user.get("name"),
                         )
                         recall_bot_id = result.get("id", "unknown")
                         reply_text = (
@@ -917,12 +937,16 @@ async def _process_recording_with_whisper(bot_id: str):
       mark_meeting_error(bot_id, str(e))     on failure -> status='error'
     """
     conversation_id = recall_client.get_conversation_for_bot(bot_id)
+    inviter = recall_client.get_inviter_for_bot(bot_id) or {}
+    invited_by_aad_object_id = inviter.get("aad_object_id")
+    invited_by_name = inviter.get("name")
 
     # Best-effort: pull subject + date from Recall now so the 'processing'
     # row in the dashboard is immediately recognisable. Failure is fine —
     # the row is still inserted with NULLs and filled in on completion.
     initial_subject: Optional[str] = None
     initial_date: Optional[str] = None
+    initial_started_at: Optional[str] = None
     try:
         early_bot_data = await recall_client.get_bot_status(bot_id)
         early_meta = (
@@ -933,6 +957,7 @@ async def _process_recording_with_whisper(bot_id: str):
         )
         initial_subject = early_meta.get("title") or None
         join_at = early_bot_data.get("join_at")
+        initial_started_at = join_at or None
         initial_date = join_at[:10] if join_at else None
     except Exception as e:
         logger.warning(f"Could not fetch initial Recall metadata for bot {bot_id}: {e}")
@@ -941,6 +966,9 @@ async def _process_recording_with_whisper(bot_id: str):
         recall_bot_id=bot_id,
         subject=initial_subject,
         meeting_date=initial_date,
+        invited_by_aad_object_id=invited_by_aad_object_id,
+        invited_by_name=invited_by_name,
+        meeting_started_at=initial_started_at,
     )
 
     try:
@@ -1118,13 +1146,20 @@ async def _process_recording_with_whisper(bot_id: str):
         except Exception as e:
             logger.error(f"Failed to render or upload DOCX artifacts for bot {bot_id}: {e}")
 
-        # 7. Persist with costs + urls.
+        # 7. Persist with costs + urls. meeting_started_at and invited_by_*
+        # are normally already on the row from start_meeting_processing —
+        # we forward them again so the UPSERT fallback (no existing row)
+        # still ends up with them populated.
+        final_started_at = initial_started_at or bot_data.get("join_at")
         meetings_db_client.complete_meeting_report(
             recall_bot_id=bot_id,
             report=report.model_dump(),
             transcript=meeting.model_dump(),
             costs=costs,
             urls=urls,
+            invited_by_aad_object_id=invited_by_aad_object_id,
+            invited_by_name=invited_by_name,
+            meeting_started_at=final_started_at,
         )
 
         # 8. Send report to Teams (text + DOCX links).

@@ -70,6 +70,9 @@ class MeetingsDBClient:
         recall_bot_id: str,
         subject: Optional[str] = None,
         meeting_date: Optional[str] = None,
+        invited_by_aad_object_id: Optional[str] = None,
+        invited_by_name: Optional[str] = None,
+        meeting_started_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Create a row marking that we have started processing this meeting.
 
@@ -77,6 +80,9 @@ class MeetingsDBClient:
         is swallowed and the existing row returned. The existing row is NOT
         overwritten — important so a retry after `complete_meeting_report` does
         not reset status='done' back to 'processing'.
+
+        `invited_by_*` and `meeting_started_at` are captured here (at start
+        time) because they are known immediately and never change for the row.
         """
         if not self.is_available():
             logger.warning("Meetings DB client unavailable — skipping start_meeting_processing")
@@ -87,6 +93,9 @@ class MeetingsDBClient:
             "status": STATUS_PROCESSING,
             "subject": subject,
             "meeting_date": meeting_date,
+            "invited_by_aad_object_id": invited_by_aad_object_id,
+            "invited_by_name": invited_by_name,
+            "meeting_started_at": meeting_started_at,
         }
 
         try:
@@ -114,6 +123,9 @@ class MeetingsDBClient:
         transcript: Optional[Dict[str, Any]] = None,
         costs: Optional[Dict[str, Optional[float]]] = None,
         urls: Optional[Dict[str, Optional[str]]] = None,
+        invited_by_aad_object_id: Optional[str] = None,
+        invited_by_name: Optional[str] = None,
+        meeting_started_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Mark a meeting as done and store the generated report and transcript.
 
@@ -125,6 +137,9 @@ class MeetingsDBClient:
                 `recall_cost_usd` (each may be None when not measured).
             urls: dict with optional keys `protocol_docx_url`,
                 `transcript_docx_url` (each may be None when upload failed).
+            invited_by_*, meeting_started_at: forwarded only to the UPSERT
+                fallback below — they are normally set once at
+                `start_meeting_processing` and not touched on completion.
 
         If the row was never created via `start_meeting_processing` (defensive
         path — e.g. processing-row insert silently failed), falls back to a
@@ -178,6 +193,9 @@ class MeetingsDBClient:
                 status=STATUS_DONE,
                 costs=costs,
                 urls=urls,
+                invited_by_aad_object_id=invited_by_aad_object_id,
+                invited_by_name=invited_by_name,
+                meeting_started_at=meeting_started_at,
             )
         except Exception as e:
             logger.error(
@@ -249,6 +267,9 @@ class MeetingsDBClient:
         status: str = STATUS_DONE,
         costs: Optional[Dict[str, Optional[float]]] = None,
         urls: Optional[Dict[str, Optional[str]]] = None,
+        invited_by_aad_object_id: Optional[str] = None,
+        invited_by_name: Optional[str] = None,
+        meeting_started_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Persist a meeting report in one shot (no separate processing phase).
 
@@ -274,6 +295,9 @@ class MeetingsDBClient:
             "recall_cost_usd": costs.get("recall_cost_usd"),
             "protocol_docx_url": urls.get("protocol_docx_url"),
             "transcript_docx_url": urls.get("transcript_docx_url"),
+            "invited_by_aad_object_id": invited_by_aad_object_id,
+            "invited_by_name": invited_by_name,
+            "meeting_started_at": meeting_started_at,
         }
 
         try:
