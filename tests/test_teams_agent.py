@@ -232,6 +232,28 @@ def test_renderer_preview_summary_hidden_when_empty():
     assert "**Резюме:**" not in text
 
 
+def test_renderer_uses_hard_line_breaks_for_teams_markdown():
+    """Each non-empty line must end with two spaces — Markdown hard line break.
+    Without it, Teams collapses the whole report into a single paragraph."""
+    text = format_report_as_text(_sample_report())
+    # Header lines must end with "  " so Teams renders them on separate lines.
+    assert "**Место проведения:** Microsoft Teams  \n" in text
+    assert "**Дата:** 2026-04-23  \n" in text
+    # Discussion item fields too.
+    assert "   Итог/действие: Решено использовать буронабивные; Иван готовит спецификацию  \n" in text
+
+
+def test_renderer_separates_discussion_items_with_blank_line():
+    """Between items there must be an empty line so Teams paragraph-breaks them."""
+    text = format_report_as_text(_sample_report())
+    # Sample has 2 discussion items. The block separating them is "  \n\n".
+    # We assert the canonical separator appears between 1st and 2nd item.
+    idx_first = text.index("1. Вопрос/тема: Тип свай")
+    idx_second = text.index("2. Вопрос/тема: Сроки поставки арматуры")
+    between = text[idx_first:idx_second]
+    assert "\n\n" in between
+
+
 def test_renderer_section_order_matches_template():
     text = format_report_as_text(_sample_report())
     idx_header = text.index("**Протокол совещания")

@@ -231,6 +231,59 @@ def test_release_unknown_bot_id_is_noop(client_with_api_key):
     assert client_with_api_key._active_meetings == {}
 
 
+# --- Inviter capture ---
+
+
+@pytest.mark.asyncio
+async def test_join_meeting_records_inviter(client_with_api_key):
+    post_mock = _mock_post_returning("bot-1")
+    with patch("services.recall_client.httpx.AsyncClient") as mock_async_client:
+        mock_async_client.return_value.__aenter__.return_value.post = post_mock
+        await client_with_api_key.join_meeting(
+            "https://teams.microsoft.com/meet/aaa",
+            teams_conversation_id="conv-1",
+            invited_by_aad_object_id="aad-9",
+            invited_by_name="Иван Петров",
+        )
+
+    inviter = client_with_api_key.get_inviter_for_bot("bot-1")
+    assert inviter == {"aad_object_id": "aad-9", "name": "Иван Петров"}
+
+
+@pytest.mark.asyncio
+async def test_join_meeting_inviter_optional(client_with_api_key):
+    """No inviter args → no inviter entry stored."""
+    post_mock = _mock_post_returning("bot-1")
+    with patch("services.recall_client.httpx.AsyncClient") as mock_async_client:
+        mock_async_client.return_value.__aenter__.return_value.post = post_mock
+        await client_with_api_key.join_meeting(
+            "https://teams.microsoft.com/meet/aaa",
+            teams_conversation_id="conv-1",
+        )
+
+    assert client_with_api_key.get_inviter_for_bot("bot-1") is None
+
+
+@pytest.mark.asyncio
+async def test_join_meeting_records_inviter_with_only_name(client_with_api_key):
+    """Guest users have no aadObjectId — name alone is still stored."""
+    post_mock = _mock_post_returning("bot-1")
+    with patch("services.recall_client.httpx.AsyncClient") as mock_async_client:
+        mock_async_client.return_value.__aenter__.return_value.post = post_mock
+        await client_with_api_key.join_meeting(
+            "https://teams.microsoft.com/meet/aaa",
+            teams_conversation_id="conv-1",
+            invited_by_name="Guest User",
+        )
+
+    inviter = client_with_api_key.get_inviter_for_bot("bot-1")
+    assert inviter == {"aad_object_id": None, "name": "Guest User"}
+
+
+def test_get_inviter_unknown_bot_returns_none(client_with_api_key):
+    assert client_with_api_key.get_inviter_for_bot("never-seen") is None
+
+
 @pytest.mark.asyncio
 async def test_join_without_api_key_raises(monkeypatch):
     monkeypatch.setattr(rc_module.settings, "recall_api_key", None)

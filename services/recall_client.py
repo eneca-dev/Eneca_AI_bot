@@ -93,6 +93,10 @@ class RecallClient:
     def __init__(self):
         # In-memory mapping: recall_bot_id -> teams_conversation_id
         self._bot_conversations: dict[str, str] = {}
+        # In-memory mapping: recall_bot_id -> {"aad_object_id", "name"}
+        # captures who pasted the meeting link to the bot. Lost on restart —
+        # acceptable, the row is filled at start_meeting_processing time only.
+        self._bot_inviters: dict[str, dict] = {}
         # Active-meeting lock: normalized_url -> (bot_id, created_at_ts)
         # Used to dedupe join_meeting calls when several users paste the same
         # meeting link. Single-process only — fine because the bot runs in one
@@ -115,8 +119,14 @@ class RecallClient:
         meeting_url: str,
         teams_conversation_id: str,
         bot_name: str = None,
+        invited_by_aad_object_id: Optional[str] = None,
+        invited_by_name: Optional[str] = None,
     ) -> dict:
         """Send a Recall bot to join a meeting.
+
+        `invited_by_*` capture who pasted the meeting link to the bot. They
+        are persisted only in memory here; the caller (server.py) reads them
+        back via `get_inviter_for_bot` when starting meeting processing.
 
         Raises `MeetingAlreadyJoinedError` if a bot we created is already in
         this meeting (within `MEETING_LOCK_TTL_SECONDS`). The caller must
@@ -171,9 +181,14 @@ class RecallClient:
             bot_id_str = str(recall_bot_id)
             self._bot_conversations[bot_id_str] = teams_conversation_id
             self._active_meetings[meeting_key] = (bot_id_str, time.time())
+            if invited_by_aad_object_id or invited_by_name:
+                self._bot_inviters[bot_id_str] = {
+                    "aad_object_id": invited_by_aad_object_id,
+                    "name": invited_by_name,
+                }
             logger.info(
                 f"Mapped recall_bot={recall_bot_id} -> teams_conv={teams_conversation_id}, "
-                f"meeting_key={meeting_key!r}"
+                f"meeting_key={meeting_key!r}, invited_by={invited_by_name!r}"
             )
 
         return data
@@ -296,6 +311,13 @@ class RecallClient:
     def get_conversation_for_bot(self, bot_id: str) -> Optional[str]:
         """Get the Teams conversation ID associated with a Recall bot"""
         return self._bot_conversations.get(str(bot_id))
+
+    def get_inviter_for_bot(self, bot_id: str) -> Optional[dict]:
+        """Return who invited the bot: {'aad_object_id': ..., 'name': ...} or None.
+
+        Either field may be None (e.g. guest user without AAD identity).
+        """
+        return self._bot_inviters.get(str(bot_id))
 
     def save_bot_conversation(self, bot_id: str, conversation_id: str):
         """Manually save a bot -> conversation mapping"""
