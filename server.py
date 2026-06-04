@@ -268,6 +268,33 @@ def _iter_strings(obj):
             yield from _iter_strings(v)
 
 
+def _extract_meeting_metadata(bot_data: Optional[dict]) -> dict:
+    """Safely dig out recordings[0].media_shortcuts.meeting_metadata.data.
+
+    Recall's JSON can carry explicit nulls at any level (key present, value
+    None). `dict.get(key, {})` does NOT apply the default in that case — it
+    returns the None — so a plain `.get(a, {}).get(b, {})` chain raises
+    'NoneType' object has no attribute 'get'. Walk defensively with `or {}`.
+    """
+    if not bot_data:
+        return {}
+    recordings = bot_data.get("recordings") or []
+    if not recordings:
+        return {}
+    shortcuts = (recordings[0] or {}).get("media_shortcuts") or {}
+    return (shortcuts.get("meeting_metadata") or {}).get("data") or {}
+
+
+def _participant_name(entry: Optional[dict], default: str = "Speaker") -> str:
+    """Name of the speaker in a Recall speaker_timeline entry, None-safe."""
+    return ((entry or {}).get("participant") or {}).get("name") or default
+
+
+def _ts_relative(entry: Optional[dict], key: str) -> float:
+    """Relative timestamp (seconds) from a speaker_timeline entry, None-safe."""
+    return ((entry or {}).get(key) or {}).get("relative") or 0
+
+
 def _format_artifact_links(urls: dict) -> str:
     """Render DOCX artifact URLs as Teams-friendly markdown links.
 
@@ -949,12 +976,7 @@ async def _process_recording_with_whisper(bot_id: str):
     initial_started_at: Optional[str] = None
     try:
         early_bot_data = await recall_client.get_bot_status(bot_id)
-        early_meta = (
-            early_bot_data.get("recordings", [{}])[0]
-            .get("media_shortcuts", {})
-            .get("meeting_metadata", {})
-            .get("data", {})
-        )
+        early_meta = _extract_meeting_metadata(early_bot_data)
         initial_subject = early_meta.get("title") or None
         join_at = early_bot_data.get("join_at")
         initial_started_at = join_at or None
@@ -1006,14 +1028,14 @@ async def _process_recording_with_whisper(bot_id: str):
         speaker_timeline = await recall_client.get_speaker_timeline(bot_id)
         if speaker_timeline:
             timeline_names = list(set(
-                e.get("participant", {}).get("name", "?") for e in speaker_timeline
+                _participant_name(e, "?") for e in speaker_timeline
             ))
             logger.info(f"Recall speaker_timeline: {len(speaker_timeline)} entries, "
                         f"participants: {timeline_names}")
             for i, entry in enumerate(speaker_timeline):
-                name = entry.get("participant", {}).get("name", "?")
-                start = entry.get("start_timestamp", {}).get("relative", 0)
-                end = entry.get("end_timestamp", {}).get("relative", 0)
+                name = _participant_name(entry, "?")
+                start = _ts_relative(entry, "start_timestamp")
+                end = _ts_relative(entry, "end_timestamp")
                 logger.info(f"  timeline[{i}]: {start:.1f}s - {end:.1f}s → {name}")
         else:
             logger.warning(f"Recall speaker_timeline is EMPTY for bot {bot_id} "
@@ -1027,11 +1049,11 @@ async def _process_recording_with_whisper(bot_id: str):
             # Calculate overlap duration with each speaker
             speaker_overlap: dict[str, float] = {}
             for entry in speaker_timeline:
-                tl_start = entry.get("start_timestamp", {}).get("relative", 0)
-                tl_end = entry.get("end_timestamp", {}).get("relative", 0)
+                tl_start = _ts_relative(entry, "start_timestamp")
+                tl_end = _ts_relative(entry, "end_timestamp")
                 overlap = max(0, min(seg_end, tl_end) - max(seg_start, tl_start))
                 if overlap > 0:
-                    name = entry.get("participant", {}).get("name", "Speaker")
+                    name = _participant_name(entry)
                     speaker_overlap[name] = speaker_overlap.get(name, 0) + overlap
 
             if speaker_overlap:
@@ -1041,12 +1063,12 @@ async def _process_recording_with_whisper(bot_id: str):
             best_name = "Speaker"
             best_dist = float("inf")
             for entry in speaker_timeline:
-                tl_start = entry.get("start_timestamp", {}).get("relative", 0)
-                tl_end = entry.get("end_timestamp", {}).get("relative", 0)
+                tl_start = _ts_relative(entry, "start_timestamp")
+                tl_end = _ts_relative(entry, "end_timestamp")
                 dist = min(abs(seg_start - tl_end), abs(seg_end - tl_start))
                 if dist < best_dist:
                     best_dist = dist
-                    best_name = entry.get("participant", {}).get("name", "Speaker")
+                    best_name = _participant_name(entry)
             return best_name
 
         # Assign speaker names to Whisper segments using max overlap
@@ -1058,12 +1080,7 @@ async def _process_recording_with_whisper(bot_id: str):
         # 4. Get meeting metadata from Recall
         bot_data = await recall_client.get_bot_status(bot_id)
 
-        meeting_metadata = (
-            bot_data.get("recordings", [{}])[0]
-            .get("media_shortcuts", {})
-            .get("meeting_metadata", {})
-            .get("data", {})
-        )
+        meeting_metadata = _extract_meeting_metadata(bot_data)
         title = meeting_metadata.get("title") or "Meeting Recording"
         date = bot_data.get("join_at", "")[:10] if bot_data.get("join_at") else ""
 
