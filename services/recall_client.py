@@ -223,13 +223,17 @@ class RecallClient:
     async def get_video_url(self, bot_id: str) -> Optional[str]:
         """Get the video download URL from a completed recording."""
         bot_data = await self.get_bot_status(bot_id)
-        recordings = bot_data.get("recordings", [])
+        recordings = (bot_data or {}).get("recordings") or []
         if not recordings:
             return None
 
-        video = recordings[0].get("media_shortcuts", {}).get("video_mixed", {})
-        if video and video.get("status", {}).get("code") == "done":
-            return video.get("data", {}).get("download_url")
+        # Recall may carry explicit nulls at any nesting level (key present,
+        # value None), where `.get(k, {})` returns the None instead of {} and
+        # the next `.get` blows up. Guard every hop with `or {}`.
+        shortcuts = (recordings[0] or {}).get("media_shortcuts") or {}
+        video = shortcuts.get("video_mixed") or {}
+        if video and (video.get("status") or {}).get("code") == "done":
+            return (video.get("data") or {}).get("download_url")
         return None
 
     async def download_video(self, bot_id: str) -> Optional[str]:
@@ -271,7 +275,7 @@ class RecallClient:
             response.raise_for_status()
             meta = response.json()
 
-            download_url = meta.get("data", {}).get("download_url")
+            download_url = (meta.get("data") or {}).get("download_url")
             if not download_url:
                 logger.warning(f"No download_url for transcript {transcript_id}")
                 return []
@@ -290,12 +294,13 @@ class RecallClient:
         Returns list of entries: {participant: {name, id}, start_timestamp: {relative}, end_timestamp: {relative}}
         """
         bot_data = await self.get_bot_status(bot_id)
-        recordings = bot_data.get("recordings", [])
+        recordings = (bot_data or {}).get("recordings") or []
         if not recordings:
             return []
 
-        pe = recordings[0].get("media_shortcuts", {}).get("participant_events", {})
-        stl_url = pe.get("data", {}).get("speaker_timeline_download_url")
+        shortcuts = (recordings[0] or {}).get("media_shortcuts") or {}
+        pe = shortcuts.get("participant_events") or {}
+        stl_url = (pe.get("data") or {}).get("speaker_timeline_download_url")
         if not stl_url:
             logger.warning(f"No speaker_timeline URL for bot {bot_id}")
             return []
