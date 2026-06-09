@@ -1,34 +1,36 @@
-name: Deploy to VPS
+name: Deploy to Server
 
 on:
   push:
     branches:
       - main
-      - master  # На случай, если ветка называется master
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Copy files via SSH
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          source: "."
-          target: "/home/${{ secrets.USERNAME }}/app"
-
-      - name: Build and Run via SSH
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+
           script: |
-            cd /home/${{ secrets.USERNAME }}/app
-            docker compose down
-            docker compose up -d --build
+            cd ~/Eneca_AI_bot
+
+            echo "--- Fetching latest code ---"
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "--- Rebuilding and restarting containers ---"
+            docker compose up -d --build --force-recreate
+
+            echo "--- Running containers ---"
+            docker ps
+
+            echo "--- Done ---"
