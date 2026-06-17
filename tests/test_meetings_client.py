@@ -102,6 +102,7 @@ def test_start_meeting_processing_inserts_row_with_processing_status():
         "meeting_date": "2026-04-25",
         "invited_by_aad_object_id": None,
         "invited_by_name": None,
+        "invited_by_email": None,
         "meeting_started_at": None,
     }
 
@@ -115,6 +116,7 @@ def test_start_meeting_processing_with_minimal_args():
     assert row["status"] == STATUS_PROCESSING
     assert row["invited_by_aad_object_id"] is None
     assert row["invited_by_name"] is None
+    assert row["invited_by_email"] is None
     assert row["meeting_started_at"] is None
 
 
@@ -132,6 +134,16 @@ def test_start_meeting_processing_persists_inviter_and_started_at():
     assert row["invited_by_aad_object_id"] == "aad-123"
     assert row["invited_by_name"] == "Иван Петров"
     assert row["meeting_started_at"] == "2026-04-25T10:00:00Z"
+
+
+def test_start_meeting_processing_persists_inviter_email():
+    client, _, table_mock = _make_client_with_mock(insert_response=[{"id": "row-1"}])
+    client.start_meeting_processing(
+        recall_bot_id="bot-1",
+        invited_by_email="ivan@eneca.com",
+    )
+    row = table_mock.insert.call_args[0][0]
+    assert row["invited_by_email"] == "ivan@eneca.com"
 
 
 def test_start_meeting_processing_handles_duplicate_via_select_fallback():
@@ -304,7 +316,8 @@ def test_upsert_row_contains_only_schema_columns():
         "recall_bot_id", "status", "subject", "meeting_date", "report", "transcript",
         "llm_cost_usd", "whisper_cost_usd", "recall_cost_usd",
         "protocol_docx_url", "transcript_docx_url",
-        "invited_by_aad_object_id", "invited_by_name", "meeting_started_at",
+        "invited_by_aad_object_id", "invited_by_name", "invited_by_email",
+        "meeting_started_at",
     }
 
 
@@ -324,6 +337,18 @@ def test_upsert_includes_inviter_and_started_at_when_provided():
     assert row["meeting_started_at"] == "2026-04-25T10:00:00Z"
 
 
+def test_upsert_includes_inviter_email_when_provided():
+    client, _, table_mock = _make_client_with_mock(upsert_response=[{"id": "abc"}])
+    client.upsert_meeting_report(
+        report=_sample_report_dict(),
+        transcript=None,
+        recall_bot_id="bot-1",
+        invited_by_email="maria@eneca.com",
+    )
+    row = table_mock.upsert.call_args[0][0]
+    assert row["invited_by_email"] == "maria@eneca.com"
+
+
 def test_complete_meeting_report_forwards_inviter_to_upsert_fallback():
     """When the row is missing, fallback UPSERT must carry inviter + started_at."""
     client, _, table_mock = _make_client_with_mock(
@@ -336,11 +361,13 @@ def test_complete_meeting_report_forwards_inviter_to_upsert_fallback():
         transcript=None,
         invited_by_aad_object_id="aad-9",
         invited_by_name="Мария",
+        invited_by_email="maria@eneca.com",
         meeting_started_at="2026-04-25T10:00:00Z",
     )
     row = table_mock.upsert.call_args[0][0]
     assert row["invited_by_aad_object_id"] == "aad-9"
     assert row["invited_by_name"] == "Мария"
+    assert row["invited_by_email"] == "maria@eneca.com"
     assert row["meeting_started_at"] == "2026-04-25T10:00:00Z"
 
 

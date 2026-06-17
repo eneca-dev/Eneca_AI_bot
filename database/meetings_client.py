@@ -72,6 +72,7 @@ class MeetingsDBClient:
         meeting_date: Optional[str] = None,
         invited_by_aad_object_id: Optional[str] = None,
         invited_by_name: Optional[str] = None,
+        invited_by_email: Optional[str] = None,
         meeting_started_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Create a row marking that we have started processing this meeting.
@@ -95,6 +96,7 @@ class MeetingsDBClient:
             "meeting_date": meeting_date,
             "invited_by_aad_object_id": invited_by_aad_object_id,
             "invited_by_name": invited_by_name,
+            "invited_by_email": invited_by_email,
             "meeting_started_at": meeting_started_at,
         }
 
@@ -125,6 +127,7 @@ class MeetingsDBClient:
         urls: Optional[Dict[str, Optional[str]]] = None,
         invited_by_aad_object_id: Optional[str] = None,
         invited_by_name: Optional[str] = None,
+        invited_by_email: Optional[str] = None,
         meeting_started_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Mark a meeting as done and store the generated report and transcript.
@@ -195,6 +198,7 @@ class MeetingsDBClient:
                 urls=urls,
                 invited_by_aad_object_id=invited_by_aad_object_id,
                 invited_by_name=invited_by_name,
+                invited_by_email=invited_by_email,
                 meeting_started_at=meeting_started_at,
             )
         except Exception as e:
@@ -269,6 +273,7 @@ class MeetingsDBClient:
         urls: Optional[Dict[str, Optional[str]]] = None,
         invited_by_aad_object_id: Optional[str] = None,
         invited_by_name: Optional[str] = None,
+        invited_by_email: Optional[str] = None,
         meeting_started_at: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Persist a meeting report in one shot (no separate processing phase).
@@ -297,6 +302,7 @@ class MeetingsDBClient:
             "transcript_docx_url": urls.get("transcript_docx_url"),
             "invited_by_aad_object_id": invited_by_aad_object_id,
             "invited_by_name": invited_by_name,
+            "invited_by_email": invited_by_email,
             "meeting_started_at": meeting_started_at,
         }
 

@@ -130,7 +130,82 @@ async def test_get_user_profile_happy_path(fake_settings):
         "department": "ГР",
         "companyName": "Eneca",
         "mail": "ivan@eneca.com",
+        "userPrincipalName": None,
     }
+
+
+# --- get_user_email ---
+
+
+@pytest.mark.asyncio
+async def test_get_user_email_prefers_mail_lowercased(fake_settings):
+    gc = _configured_client()
+    token_resp = _make_token_response("tok-A")
+    profile_resp = _make_response(200, {
+        "displayName": "Иван", "mail": "Ivan.Petrov@Eneca.COM",
+        "userPrincipalName": "ivan_upn@eneca.com",
+    })
+    cm_token, _ = _make_client(post_response=token_resp)
+    cm_get, _ = _make_client(get_response=profile_resp)
+
+    with patch("services.graph_client.httpx.AsyncClient", side_effect=[cm_token, cm_get]):
+        email = await gc.get_user_email("aad-1")
+
+    assert email == "ivan.petrov@eneca.com"
+
+
+@pytest.mark.asyncio
+async def test_get_user_email_falls_back_to_upn(fake_settings):
+    gc = _configured_client()
+    token_resp = _make_token_response("tok-A")
+    profile_resp = _make_response(200, {
+        "displayName": "Гость", "mail": None,
+        "userPrincipalName": "Guest.User@eneca.com",
+    })
+    cm_token, _ = _make_client(post_response=token_resp)
+    cm_get, _ = _make_client(get_response=profile_resp)
+
+    with patch("services.graph_client.httpx.AsyncClient", side_effect=[cm_token, cm_get]):
+        email = await gc.get_user_email("aad-2")
+
+    assert email == "guest.user@eneca.com"
+
+
+@pytest.mark.asyncio
+async def test_get_user_email_none_when_no_email_fields(fake_settings):
+    gc = _configured_client()
+    token_resp = _make_token_response("tok-A")
+    profile_resp = _make_response(200, {
+        "displayName": "NoEmail", "mail": None, "userPrincipalName": None,
+    })
+    cm_token, _ = _make_client(post_response=token_resp)
+    cm_get, _ = _make_client(get_response=profile_resp)
+
+    with patch("services.graph_client.httpx.AsyncClient", side_effect=[cm_token, cm_get]):
+        email = await gc.get_user_email("aad-3")
+
+    assert email is None
+
+
+@pytest.mark.asyncio
+async def test_get_user_email_none_for_empty_aad():
+    gc = _configured_client()
+    assert await gc.get_user_email(None) is None
+
+
+@pytest.mark.asyncio
+async def test_get_user_email_none_when_profile_unavailable(fake_settings):
+    """Graph 404 → no profile → no email, no raise."""
+    gc = _configured_client()
+    token_resp = _make_token_response("tok-A")
+    not_found = _make_response(404, {"error": {"message": "not found"}})
+    cm_token, _ = _make_client(post_response=token_resp)
+    cm_get, _ = _make_client(get_response=not_found)
+
+    with patch("services.graph_client.httpx.AsyncClient", side_effect=[cm_token, cm_get]):
+        email = await gc.get_user_email("aad-missing")
+
+    assert email is None
 
 
 # --- Token caching ---

@@ -183,6 +183,7 @@ def _persist_meeting_report(
     recall_bot_id: Optional[str] = None,
     invited_by_aad_object_id: Optional[str] = None,
     invited_by_name: Optional[str] = None,
+    invited_by_email: Optional[str] = None,
     meeting_started_at: Optional[str] = None,
 ) -> None:
     """Persist a generated report to the meetings Supabase project.
@@ -197,6 +198,7 @@ def _persist_meeting_report(
             recall_bot_id=recall_bot_id,
             invited_by_aad_object_id=invited_by_aad_object_id,
             invited_by_name=invited_by_name,
+            invited_by_email=invited_by_email,
             meeting_started_at=meeting_started_at,
         )
     except Exception as e:
@@ -675,6 +677,7 @@ async def teams_process_meeting(
         inviter_ref = teams_sender.get_conversation_reference(request.teams_conversation_id) if request.teams_conversation_id else None
         invited_by_aad_object_id = (inviter_ref or {}).get("user_aad_object_id")
         invited_by_name = (inviter_ref or {}).get("user_name")
+        invited_by_email = await graph_client.get_user_email(invited_by_aad_object_id)
 
         loop = asyncio.get_event_loop()
         report, _llm_usage = await loop.run_in_executor(
@@ -691,6 +694,7 @@ async def teams_process_meeting(
             recall_bot_id=None,
             invited_by_aad_object_id=invited_by_aad_object_id,
             invited_by_name=invited_by_name,
+            invited_by_email=invited_by_email,
         )
 
         # Send report to Teams if configured and requested
@@ -967,6 +971,10 @@ async def _process_recording_with_whisper(bot_id: str):
     inviter = recall_client.get_inviter_for_bot(bot_id) or {}
     invited_by_aad_object_id = inviter.get("aad_object_id")
     invited_by_name = inviter.get("name")
+    # Resolve the inviter's email via Graph so the dashboard can match the
+    # meeting to its owner (profiles.email is lowercase → so is this). Fails
+    # open to None — never blocks processing.
+    invited_by_email = await graph_client.get_user_email(invited_by_aad_object_id)
 
     # Best-effort: pull subject + date from Recall now so the 'processing'
     # row in the dashboard is immediately recognisable. Failure is fine —
@@ -990,6 +998,7 @@ async def _process_recording_with_whisper(bot_id: str):
         meeting_date=initial_date,
         invited_by_aad_object_id=invited_by_aad_object_id,
         invited_by_name=invited_by_name,
+        invited_by_email=invited_by_email,
         meeting_started_at=initial_started_at,
     )
 
@@ -1176,6 +1185,7 @@ async def _process_recording_with_whisper(bot_id: str):
             urls=urls,
             invited_by_aad_object_id=invited_by_aad_object_id,
             invited_by_name=invited_by_name,
+            invited_by_email=invited_by_email,
             meeting_started_at=final_started_at,
         )
 
