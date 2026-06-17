@@ -26,7 +26,7 @@ class GraphClient:
 
     OAUTH_SCOPE = "https://graph.microsoft.com/.default"
     GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-    PROFILE_FIELDS = "displayName,jobTitle,department,companyName,mail"
+    PROFILE_FIELDS = "displayName,jobTitle,department,companyName,mail,userPrincipalName"
     PROFILE_TTL_SECONDS = 30 * 60  # 30 minutes
 
     def __init__(self):
@@ -132,6 +132,7 @@ class GraphClient:
                 "department": raw.get("department"),
                 "companyName": raw.get("companyName"),
                 "mail": raw.get("mail"),
+                "userPrincipalName": raw.get("userPrincipalName"),
             }
             self._profile_cache[aad_object_id] = (profile, time.time())
             logger.info(
@@ -145,6 +146,20 @@ class GraphClient:
         except Exception as e:
             logger.error(f"Failed to fetch Graph profile for {aad_object_id}: {e}")
             return None
+
+    async def get_user_email(self, aad_object_id: Optional[str]) -> Optional[str]:
+        """Resolve a user's email by AAD Object ID, lowercased.
+
+        Prefers `mail`; falls back to `userPrincipalName` (almost always
+        present and email-shaped for member accounts). Returns None when the
+        profile is unavailable or carries neither field. Lowercased so callers
+        can match it against profiles.email (stored lowercase) exactly.
+        """
+        profile = await self.get_user_profile(aad_object_id)
+        if not profile:
+            return None
+        email = profile.get("mail") or profile.get("userPrincipalName")
+        return email.lower() if email else None
 
 
 graph_client = GraphClient()
