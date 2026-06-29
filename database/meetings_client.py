@@ -169,6 +169,20 @@ class MeetingsDBClient:
             "transcript_docx_url": urls.get("transcript_docx_url"),
         }
 
+        # Backfill owner / start-time fields on completion too. Normally these
+        # are written once by start_meeting_processing, but if that INSERT was
+        # skipped (e.g. it lost a unique-constraint race to a duplicate webhook),
+        # the row would otherwise keep them NULL forever. Only overwrite with a
+        # non-None value so a late empty retry never wipes data already set.
+        for col, val in (
+            ("invited_by_aad_object_id", invited_by_aad_object_id),
+            ("invited_by_name", invited_by_name),
+            ("invited_by_email", invited_by_email),
+            ("meeting_started_at", meeting_started_at),
+        ):
+            if val is not None:
+                update_row[col] = val
+
         try:
             response = (
                 self.client.table(TABLE)
