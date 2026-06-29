@@ -411,6 +411,47 @@ def test_complete_meeting_report_passes_costs_and_urls():
     assert update_row["transcript_docx_url"] == "https://x/t.docx"
 
 
+# --- bug-VN-02: complete_meeting_report must backfill owner / start fields ---
+
+
+def test_complete_meeting_report_backfills_invited_by_on_update():
+    """bug-VN-02: invited_by_* and meeting_started_at used to live ONLY in the
+    UPSERT fallback, so the normal UPDATE path left them NULL whenever
+    start_meeting_processing's INSERT was skipped (e.g. duplicate-webhook race).
+    They must now be written on the UPDATE when provided."""
+    client, _, table_mock = _make_client_with_mock(update_response=[{"id": "row-1"}])
+    client.complete_meeting_report(
+        recall_bot_id="bot-1",
+        report=_sample_report_dict(),
+        transcript=_sample_transcript_dict(),
+        invited_by_aad_object_id="aad-z",
+        invited_by_name="Owner Z",
+        invited_by_email="owner.z@example.com",
+        meeting_started_at="2026-06-29T10:00:00+00:00",
+    )
+    update_row = table_mock.update.call_args[0][0]
+    assert update_row["invited_by_aad_object_id"] == "aad-z"
+    assert update_row["invited_by_name"] == "Owner Z"
+    assert update_row["invited_by_email"] == "owner.z@example.com"
+    assert update_row["meeting_started_at"] == "2026-06-29T10:00:00+00:00"
+
+
+def test_complete_meeting_report_does_not_wipe_owner_fields_with_none():
+    """A late empty retry (invited_by omitted) must NOT overwrite fields already
+    set at start time — so the UPDATE only includes owner keys when non-None."""
+    client, _, table_mock = _make_client_with_mock(update_response=[{"id": "row-1"}])
+    client.complete_meeting_report(
+        recall_bot_id="bot-1",
+        report=_sample_report_dict(),
+        transcript=_sample_transcript_dict(),
+    )
+    update_row = table_mock.update.call_args[0][0]
+    assert "invited_by_aad_object_id" not in update_row
+    assert "invited_by_name" not in update_row
+    assert "invited_by_email" not in update_row
+    assert "meeting_started_at" not in update_row
+
+
 # --- Read ---
 
 

@@ -219,3 +219,34 @@ def test_label_text_alone_does_not_match():
         "text": "Созвон с Артемом | Meeting-Join | Microsoft Teams",
     }
     assert extract_meeting_url_from_activity(activity) is None
+
+
+# --- bug-VN-01: Zoom host must respect a subdomain boundary ---
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://zoom.us/j/123456",
+        "https://us02web.zoom.us/j/85512345678?pwd=Qm5k",
+        "https://acme.zoom.us/j/123456",       # vanity / corporate subdomain
+        "https://us02web.zoom.us/w/123456",    # webinar path
+    ],
+)
+def test_zoom_real_domains_match(url):
+    assert extract_meeting_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evilzoom.us/j/123456",        # lookalike glued onto `zoom`
+        "https://x.evilzoom.us/j/123456",      # lookalike with a subdomain
+        "https://zoom.us.evil.com/j/123456",   # `zoom.us` as a fake subdomain
+    ],
+)
+def test_zoom_lookalike_domains_do_not_match(url):
+    """bug-VN-01: `[\\w.-]*zoom\\.us` used to match any host ending in
+    `zoom.us` (e.g. `evilzoom.us`). The subdomain-boundary pattern rejects them."""
+    assert extract_meeting_url(url) is None
+    assert extract_meeting_url_from_activity({"type": "message", "text": url}) is None

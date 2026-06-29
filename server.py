@@ -18,7 +18,7 @@ from services.graph_client import graph_client
 from services.docx_renderer import render_report_docx, render_transcript_docx
 from services.storage_client import storage_client
 from services import cost_calculator
-from database.meetings_client import meetings_db_client
+from database.meetings_client import meetings_db_client, STATUS_DONE
 from core.config import settings
 from loguru import logger
 import uuid
@@ -170,8 +170,11 @@ MEETING_URL_PATTERNS = [
     re.compile(r'https?://teams\.microsoft\.com/l/meetup-join/[^\s<>"]+', re.IGNORECASE),
     re.compile(r'https?://teams\.microsoft\.com/meet/[^\s<>"]+', re.IGNORECASE),
     re.compile(r'https?://teams\.live\.com/meet/[^\s<>"]+', re.IGNORECASE),
-    # Zoom meeting links
-    re.compile(r'https?://[\w.-]*zoom\.us/[jw]/[^\s<>"]+', re.IGNORECASE),
+    # Zoom meeting links — require a subdomain boundary before `zoom.us` so a
+    # lookalike domain like `evilzoom.us` does NOT match. `([\w-]+\.)*` allows
+    # `zoom.us` and any real subdomain (`us02web.zoom.us`, vanity `acme.zoom.us`)
+    # but not a word glued onto `zoom` with no dot.
+    re.compile(r'https?://([\w-]+\.)*zoom\.us/[jw]/[^\s<>"]+', re.IGNORECASE),
     # Google Meet links
     re.compile(r'https?://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}[^\s<>"]*', re.IGNORECASE),
 ]
@@ -992,7 +995,7 @@ async def _process_recording_with_whisper(bot_id: str):
     except Exception as e:
         logger.warning(f"Could not fetch initial Recall metadata for bot {bot_id}: {e}")
 
-    meetings_db_client.start_meeting_processing(
+    existing_row = meetings_db_client.start_meeting_processing(
         recall_bot_id=bot_id,
         subject=initial_subject,
         meeting_date=initial_date,
@@ -1001,6 +1004,18 @@ async def _process_recording_with_whisper(bot_id: str):
         invited_by_email=invited_by_email,
         meeting_started_at=initial_started_at,
     )
+
+    # Idempotency guard (bug-VN-03): if this recording was already processed to
+    # completion (e.g. a delayed Recall webhook retry after we finished), skip
+    # the whole pipeline — re-running Whisper + LLM would just burn cost and
+    # risk a duplicate Teams delivery. A row in 'processing'/'error' is NOT
+    # skipped: that may be a stuck/failed prior run that legitimately needs a retry.
+    if existing_row and existing_row.get("status") == STATUS_DONE:
+        logger.info(
+            f"Recording {bot_id} already completed (status=done) — "
+            f"skipping duplicate processing"
+        )
+        return
 
     try:
         logger.info(f"Processing recording for bot {bot_id} via Whisper")
